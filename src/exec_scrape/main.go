@@ -1,16 +1,15 @@
 package main
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang-14 gen_execve ./bpf/execve.bpf.c -- -I/usr/include/bpf -I../common
-
 import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log"
+	"os"
+
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
 	"golang.org/x/sys/unix"
-	"log"
-	"os"
 )
 
 type exec_data_t struct {
@@ -21,14 +20,15 @@ type exec_data_t struct {
 
 func setlimit() {
 	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK,
-	&unix.Rlimit{
-		Cur: unix.RLIM_INFINITY,
-		Max: unix.RLIM_INFINITY,
-	}); err != nil {
+		&unix.Rlimit{
+			Cur: unix.RLIM_INFINITY,
+			Max: unix.RLIM_INFINITY,
+		}); err != nil {
 		log.Fatalf("failed to set temporary rlimit: %v", err)
 	}
 }
 
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -cc clang-14 gen_execve ./bpf/execve.bpf.c -- -I/usr/include/bpf -I../common
 func main() {
 	setlimit()
 
@@ -62,6 +62,6 @@ func main() {
 		}
 
 		fmt.Printf("On cpu %02d %s ran : %d %s\n",
-		ev.CPU, data.Comm, data.Pid, data.F_name)
+			ev.CPU, data.Comm, data.Pid, data.F_name)
 	}
 }
