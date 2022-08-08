@@ -70,10 +70,13 @@ struct tcp_sock {
 	u32 rtt_seq;     /* sequence number to update rttvar	*/
 } __attribute__((preserve_access_index));
 
+/*
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 24);
 } events SEC(".maps");
+*/
+
 
 /**
  * The sample submitted to userspace over a ring buffer.
@@ -86,10 +89,19 @@ struct event {
 	u32 saddr;
 	u32 daddr;
 	u32 srtt;
-	u32 mdev_us;
+	/*
 	u32 rttvar_us;
+	u32 unused1;
+	u64 unused2;*/
 };
 struct event *unused_event __attribute__((unused));
+
+struct {
+	__uint(type, BPF_MAP_TYPE_QUEUE);
+	__uint(key_size, 0);
+	__uint(value_size, sizeof(struct event));
+	__uint(max_entries, 1024);
+} events SEC(".maps");
 
 SEC("kprobe/tcp_close")
 int BPF_KPROBE(tcp_close, struct sock *sk) {
@@ -101,27 +113,22 @@ int BPF_KPROBE(tcp_close, struct sock *sk) {
 		return 0;
 	}
 
-	struct event *tcp_info;
-	tcp_info = bpf_ringbuf_reserve(&events, sizeof(struct event), 0);
-	if (!tcp_info) {
-		return 0;
-	}
-
+	struct event tcp_info;
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
 
-	bpf_probe_read_kernel(&tcp_info->saddr, sizeof(tcp_info->saddr), &(sk->__sk_common.skc_rcv_saddr));
-	bpf_probe_read_kernel(&tcp_info->daddr, sizeof(tcp_info->daddr), &(sk->__sk_common.skc_daddr));
-	bpf_probe_read_kernel(&tcp_info->sport, sizeof(tcp_info->sport), &(sk->__sk_common.skc_num));
-	bpf_probe_read_kernel(&tcp_info->dport, sizeof(tcp_info->dport), &(sk->__sk_common.skc_dport));
-	tcp_info->dport = bpf_ntohs(tcp_info->dport);
+	bpf_probe_read_kernel(&tcp_info.saddr, sizeof(tcp_info.saddr), &(sk->__sk_common.skc_rcv_saddr));
+	bpf_probe_read_kernel(&tcp_info.daddr, sizeof(tcp_info.daddr), &(sk->__sk_common.skc_daddr));
+	bpf_probe_read_kernel(&tcp_info.sport, sizeof(tcp_info.sport), &(sk->__sk_common.skc_num));
+	bpf_probe_read_kernel(&tcp_info.dport, sizeof(tcp_info.dport), &(sk->__sk_common.skc_dport));
+	tcp_info.dport = bpf_ntohs(tcp_info.dport);
 
-	bpf_probe_read_kernel(&tcp_info->srtt, sizeof(tcp_info->srtt), &ts->srtt_us);
-	bpf_probe_read_kernel(&tcp_info->rttvar_us, sizeof(tcp_info->rttvar_us), &ts->rttvar_us);
+	bpf_probe_read_kernel(&tcp_info.srtt, sizeof(tcp_info.srtt), &ts->srtt_us);
+//	bpf_probe_read_kernel(&tcp_info.rttvar_us, sizeof(tcp_info.rttvar_us), &ts->rttvar_us);
 
-	tcp_info->srtt = (tcp_info->srtt >> 3) / 1000;
-	tcp_info->rttvar_us /= 1000;
+	tcp_info.srtt = (tcp_info.srtt >> 3) / 1000;
+//	tcp_info.rttvar_us /= 1000;
 
-	bpf_ringbuf_submit(tcp_info, 0);
+	bpf_map_push_elem(&events, &tcp_info, 0);
 
 	return 0;
 }
