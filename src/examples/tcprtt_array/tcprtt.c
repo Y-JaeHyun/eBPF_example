@@ -69,7 +69,6 @@ struct tcp_sock {
 	u32 rttvar_us;   /* smoothed mdev_max			*/
 	u32 rtt_seq;     /* sequence number to update rttvar	*/
 } __attribute__((preserve_access_index));
-
 /*
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -77,22 +76,20 @@ struct {
 } events SEC(".maps");
 */
 
-
 /**
  * The sample submitted to userspace over a ring buffer.
  * Emit struct event's type info into the ELF's BTF so bpf2go
  * can generate a Go type from it.
  */
 struct key {
+	u32 unused1;
+	u64 unused2;
+};
+struct value {
 	u16 sport;
 	u16 dport;
 	u32 saddr;
 	u32 daddr;
-	/*
-	u32 unused1;
-	u64 unused2;*/
-};
-struct value {
 	u32 srtt;
 	u32 rttvar_us;
 };
@@ -100,15 +97,17 @@ struct value {
 struct key *unused_key __attribute__((unused));
 struct value *unused_value __attribute__((unused));
 
-/*
 struct {
-//	__uint(type, BPF_MAP_TYPE_QUEUE);
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(key_size, sizeof(struct key));
+
+	__uint(key_size, sizeof(u32));
 	__uint(value_size, sizeof(struct value));
+//	__uint(key_size, sizeof(struct key));
+//	__uint(value_size, sizeof(struct value));
 	__uint(max_entries, 1024);
 } events SEC(".maps");
 
+/*
 struct bpf_map_def SEC("maps/tcp_close") events = {
 	.type = BPF_MAP_TYPE_ARRAY,
 	.key_size = sizeof(struct key),
@@ -131,11 +130,13 @@ int BPF_KPROBE(tcp_close, struct sock *sk) {
 	struct value v;
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
 
-	bpf_probe_read_kernel(&k.saddr, sizeof(k.saddr), &(sk->__sk_common.skc_rcv_saddr));
-	bpf_probe_read_kernel(&k.daddr, sizeof(k.daddr), &(sk->__sk_common.skc_daddr));
-	bpf_probe_read_kernel(&k.sport, sizeof(k.sport), &(sk->__sk_common.skc_num));
-	bpf_probe_read_kernel(&k.dport, sizeof(k.dport), &(sk->__sk_common.skc_dport));
-	k.dport = bpf_ntohs(k.dport);
+	u32 index = 0;
+
+	bpf_probe_read_kernel(&v.saddr, sizeof(v.saddr), &(sk->__sk_common.skc_rcv_saddr));
+	bpf_probe_read_kernel(&v.daddr, sizeof(v.daddr), &(sk->__sk_common.skc_daddr));
+	bpf_probe_read_kernel(&v.sport, sizeof(v.sport), &(sk->__sk_common.skc_num));
+	bpf_probe_read_kernel(&v.dport, sizeof(v.dport), &(sk->__sk_common.skc_dport));
+	v.dport = bpf_ntohs(v.dport);
 
 	bpf_probe_read_kernel(&v.srtt, sizeof(v.srtt), &ts->srtt_us);
 	bpf_probe_read_kernel(&v.rttvar_us, sizeof(v.rttvar_us), &ts->rttvar_us);
@@ -143,7 +144,7 @@ int BPF_KPROBE(tcp_close, struct sock *sk) {
 	v.srtt = (v.srtt >> 3) / 1000;
 	v.rttvar_us /= 1000;
 
-	//bpf_map_update_elem(&events, &k, &v, BPF_ANY);
+	bpf_map_update_elem(&events, &index, &v, BPF_ANY);
 
 	return 0;
 }
