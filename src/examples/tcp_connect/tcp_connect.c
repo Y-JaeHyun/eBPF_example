@@ -43,6 +43,7 @@ struct sock_common {
 		};
 	};
 	short unsigned int skc_family;
+	int sk_sndbuf;
 } __attribute__((preserve_access_index));
 
 struct sock {
@@ -149,6 +150,15 @@ struct {
 	__uint(max_entries, 1024);
 } events2 SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_QUEUE);
+//	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(key_size, 0);
+	__uint(value_size, sizeof(struct event));
+	__uint(max_entries, 1024);
+} events_cleanup SEC(".maps");
+
+
 
 SEC("kprobe/tcp_close")
 int BPF_KPROBE(tcp_close, struct sock *sk) {
@@ -254,7 +264,7 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 
 	struct pid_comm_t p = { .pid = pid };
 	bpf_get_current_comm(p.comm, sizeof(p.comm));
-	int32_t bytes_sent = PT_REGS_RC(ctx);
+	int bytes_sent = PT_REGS_RC(ctx);
 
 	bpf_map_update_elem(&send_check_ipv4, &tcp_info, &p, BPF_ANY);
 	return 0;
@@ -267,7 +277,7 @@ SEC("kprobe/tcp_sendpage")
 int kprobe__tcp_sendpage(struct pt_regs *ctx) {
 	bpf_printk("tcp_sendpageyy\n");
 	struct sock *sk = (struct sock*)PT_REGS_PARM1(ctx);
-	int32_t bytes_sent = (int32_t)PT_REGS_PARM4(ctx);
+	int bytes_sent = (int)PT_REGS_PARM4(ctx);
 
 	return 0;
 
@@ -279,6 +289,7 @@ SEC("kprobe/inet_csk_accept")
 int kprobe__inet_csk_accept(struct pt_regs* ctx) {
 	bpf_printk("inet_csk_accept\n");
 	struct event tcp_info = {0, };
+	tcp_info.sport = 1;
 	bpf_map_push_elem(&events2, &tcp_info, 0);
 	return 0;
 }
@@ -388,6 +399,10 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 SEC("kprobe/tcp_cleanup_rbuf")
 int kprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 	bpf_printk("tcp_cleanup_rbuf\n");
+
+	struct event tcp_info = {0, };
+	tcp_info.srtt = 1;
+	bpf_map_push_elem(&events_cleanup, &tcp_info, 0);
 	return 0;
 }
 
@@ -397,4 +412,17 @@ int kprobe__tcp_retransmit_skb(struct pt_regs *ctx) {
 	return 0;
 	
 }
+
+
+SEC("kprobe/tcp_recvmsg")
+int kprobe__tcp__recvmsg(struct pt_regs *ctx) {
+	bpf_printk("tcp_recvmsg\n");
+
+	struct event tcp_info = {0, };
+	tcp_info.srtt = 2;
+	bpf_map_push_elem(&events_cleanup, &tcp_info, 0);
+	return 0;
+}
+
+
 
