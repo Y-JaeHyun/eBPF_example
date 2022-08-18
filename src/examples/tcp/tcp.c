@@ -194,6 +194,7 @@ int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 	bpf_probe_read_kernel(&k.sport, sizeof(k.sport), &(sk->__sk_common.skc_num));
 	bpf_probe_read_kernel(&k.dport, sizeof(k.dport), &(sk->__sk_common.skc_dport));
 	k.dport = bpf_ntohs(k.dport);
+	k.pid = pid;
 
 	bpf_probe_read_kernel(&v.srtt, sizeof(v.srtt), &ts->srtt_us);
 	v.srtt = 0;
