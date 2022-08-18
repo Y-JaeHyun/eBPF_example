@@ -60,100 +60,89 @@ struct tcp_sock {
 } __attribute__((preserve_access_index));
 
 /////////////////////////////////////////////////////////
-
-/**
- * The sample submitted to userspace over a ring buffer.
- * Emit struct event's type info into the ELF's BTF so bpf2go
- * can generate a Go type from it.
- */
-struct event {
-	u16 sport;
-	u16 dport;
-	u32 saddr;
-	u32 daddr;
-	u32 srtt;
-	/*
-	u32 rttvar_us;
-	u32 unused1;
-	u64 unused2;*/
-};
-
+///
 SEC("kprobe/tcp_close")
 int kprobe__tcp_close(struct pt_regs *ctx) {
-	bpf_printk("tcp_close\n");
+	const char fmt_str[] = "tcp_close\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
 
 SEC("kprobe/tcp_set_state")
 int kprobe__tcp_set_state(struct pt_regs* ctx) {
-	bpf_printk("tcp_set_state\n");
+	const char fmt_str[] = "tcp_set_state\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
 
 SEC("kprobe/tcp_sendmsg")
 int kprobe__tcp_sendmsg(struct pt_regs*ctx) {
-	bpf_printk("tcp_sendmsg\n");
+	const char fmt_str[] = "tcp_sendmsg\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
 
 SEC("kretprobe/tcp_sendmsg")
 int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
-	bpf_printk("tcp_sendmsg(ret)\n");
+	const char fmt_str[] = "tcp_sendmsg(ret)\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
-
 SEC("kprobe/tcp_sendpage")
 int kprobe__tcp_sendpage(struct pt_regs *ctx) {
-	bpf_printk("tcp_sendpageyy\n");
+	const char fmt_str[] = "tcp_sendpage\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 
 }
 
 SEC("kprobe/inet_csk_accept")
 int kprobe__inet_csk_accept(struct pt_regs* ctx) {
-	bpf_printk("inet_csk_accept\n");
+	const char fmt_str[] = "inet_csk_accept\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
 
 SEC("kretprobe/inet_csk_accept")
 int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
-	bpf_printk("inet_csk_accept(ret)\n");
+	const char fmt_str[] = "inet_csk_accept(ret)\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
 
 SEC("kprobe/tcp_v4_connect")
 int kprobe__tcp_v4_connect(struct pt_regs *ctx)
 {
-	bpf_printk("tcp_v4_connect\n");
+	const char fmt_str[] = "tcp_v4_connect\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
 
 SEC("kretprobe/tcp_v4_connect")
 int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
 {
-	bpf_printk("tcp_v4_connect (ret)\n");
+	const char fmt_str[] = "tcp_v4_connect(ret)\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
 
-//tcp_recvmsg 대체
 SEC("kprobe/tcp_cleanup_rbuf")
 int kprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
-	bpf_printk("tcp_cleanup_rbuf\n");
+	const char fmt_str[] = "tcp_cleanup_rbuf\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
-
 SEC("kprobe/tcp_retransmit_skb")
 int kprobe__tcp_retransmit_skb(struct pt_regs *ctx) {
-	bpf_printk("tcp_retransmit_skb\n");
+	const char fmt_str[] = "tcp_retransmit_sk\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
-	
 }
 
 SEC("kprobe/tcp_recvmsg")
 int kprobe__tcp__recvmsg(struct pt_regs *ctx) {
-	bpf_printk("tcp_recvmsg\n");
+	const char fmt_str[] = "tcp_recvmsg\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 	return 0;
 }
-
-
 
