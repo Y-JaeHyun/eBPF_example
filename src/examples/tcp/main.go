@@ -113,7 +113,6 @@ func main() {
 		log.Fatal(err)
 	}
 	defer link5.Close()
-
 	link6, err := link.Kprobe("tcp_sendmsg", objs.KprobeTcpSendmsg, nil)
 	if err != nil {
 		fmt.Println(err)
@@ -127,7 +126,6 @@ func main() {
 		log.Fatal(err)
 	}
 	defer link7.Close()
-
 	link8, err := link.Kprobe("tcp_cleanup_rbuf", objs.KprobeTcpCleanupRbpf, nil)
 	if err != nil {
 		fmt.Println(err)
@@ -135,13 +133,19 @@ func main() {
 	}
 	defer link8.Close()
 
-	link9, err := link.Kprobe("tcp_close", objs.KprobeTcpClose, nil)
+	link9, err := link.Kretprobe("tcp_cleanup_rbuf", objs.KretprobeTcpCleanupRbpf, nil)
 	if err != nil {
 		fmt.Println(err)
 		log.Fatal(err)
 	}
 	defer link9.Close()
 
+	link10, err := link.Kprobe("tcp_close", objs.KprobeTcpClose, nil)
+	if err != nil {
+		fmt.Println(err)
+		log.Fatal(err)
+	}
+	defer link10.Close()
 	// Wait
 
 	go func() {
@@ -155,6 +159,12 @@ func main() {
 				ret := iter.Next(&key, &value)
 				if ret {
 					fmt.Println(key, value)
+					value.CheckFlag += 1
+					if value.Status != 7 {
+						//objs.StatusMap.Update(key, value, ebpf.UpdateAny)
+					} else {
+						objs.StatusMap.Delete(key)
+					}
 				} else {
 					break
 				}

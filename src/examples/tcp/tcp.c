@@ -15,6 +15,9 @@
 #include "bpf_tracing.h"
 
 /////////////////////////////////////////////////////////
+//TODO 1 : Lock 최소화를 위해 map 분리 필요 (session, tcp, udp 등 따로 관리)
+//TODO 2 : 전체적인 동작 flow 재정리
+/////////////////////////////////////////////////////////
 char __license[] SEC("license") = "GPL";
 
 struct nKey {
@@ -34,17 +37,21 @@ struct nKey {
 struct statusValue{
 	u32 totalCount;
 	u32 connectCount;
-	u32 estabilishCount;
+	u32 establishCount;
 	u32 sendCount;
 	u32 recvCount;
 	u32 closeCount;
-	u32 retransmissionCount;
+	u32 retransPacket;
+	u32 lostPacket;
+	u32 sendPacket;
+	u32 recvPacket;
 	u32 sendByte;
 	u32 recvByte;
 	u32 srtt;
-	u32 mdev_us;
+	u32 mdev;
 	u32 status;
 	u8 bound;
+	u8 checkFlag;
 };
 
 struct nKey *unused_key_t  __attribute__((unused));
@@ -107,171 +114,7 @@ static int setNKey4Tuple(struct nKey *k, struct sock *sk) {
 }
 
 ///
-SEC("kprobe/tcp_close")
-int kprobe__tcp_close(struct pt_regs *ctx) {
-	const char fmt_str[] = "tcp_close\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-	return 0;
-}
 
-SEC("kprobe/tcp_set_state")
-int kprobe__tcp_set_state(struct pt_regs* ctx) {
-	const char fmt_str[] = "tcp_set_state\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-	return 0;
-}
-
-SEC("kprobe/tcp_sendmsg")
-int kprobe__tcp_sendmsg(struct pt_regs*ctx) {
-	const char fmt_str[] = "tcp_sendmsg\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
-	struct sock *sk;
-	u64 pid = bpf_get_current_pid_tgid();
-
-	sk = (struct sock *) PT_REGS_PARM1(ctx);
-
-	bpf_map_update_elem(&sendSock, &pid, &sk, BPF_ANY);
-
-
-	return 0;
-}
-
-SEC("kretprobe/tcp_sendmsg")
-int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
-	const char fmt_str[] = "tcp_sendmsg(ret)\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
-	u64 pid = bpf_get_current_pid_tgid();
-	struct sock **skpp;
-	skpp = bpf_map_lookup_elem(&sendSock, &pid);
-	if (skpp == 0) {
-
-		return -1;	// missed entry
-	}
-
-	struct sock *sk = *skpp;
-	bpf_map_delete_elem(&sendSock, &pid);
-
-	struct nKey k;
-	__builtin_memset(&k, 0, sizeof(struct nKey));
-
-	if (setNKey4Tuple(&k, sk) == -1) {
-		return -1;
-	}
-	k.pid = pid;
-
-	struct tcp_sock *ts = (struct tcp_sock*)sk;
-	struct statusValue *v;
-	v = bpf_map_lookup_elem(&statusMap, &k);
-
-	if (v != NULL) {
-		u32 tSrtt;
-		u32 tMdev;
-		u32 sByte;
-		u32 rByte;
-
-		bpf_probe_read_kernel(&tSrtt, sizeof(tSrtt), &ts->srtt_us);
-		bpf_probe_read_kernel(&tMdev, sizeof(tMdev), &ts->mdev_us);
-
-		v->srtt = (v->srtt * v->totalCount + tSrtt) / (v->totalCount + 1);
-		v->mdev_us = (v->mdev_us * v->totalCount + tMdev) / (v->totalCount + 1);
-
-		v->totalCount++;
-		v->sendCount++;
-
-		bpf_probe_read_kernel(&sByte, sizeof(sByte), &ts->segs_out);
-		bpf_probe_read_kernel(&rByte, sizeof(rByte), &ts->segs_in);
-		
-		__sync_fetch_and_add(&v->sendByte, sByte);
-		__sync_fetch_and_add(&v->recvByte, rByte);
-		
-
-		bpf_map_update_elem(&statusMap, &k, v, BPF_ANY);
-
-	} else {
-		return -1;
-	}
-
-	return 0;
-}
-SEC("kprobe/tcp_sendpage")
-int kprobe__tcp_sendpage(struct pt_regs *ctx) {
-	const char fmt_str[] = "tcp_sendpage\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-	return 0;
-
-}
-
-SEC("kprobe/inet_csk_accept")
-int kprobe__inet_csk_accept(struct pt_regs* ctx) {
-	const char fmt_str[] = "inet_csk_accept\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
-	struct sock *sk;
-	u64 pid = bpf_get_current_pid_tgid();
-
-	sk = (struct sock *) PT_REGS_PARM1(ctx);
-
-	bpf_map_update_elem(&acceptSock, &pid, &sk, BPF_ANY);
-
-
-	return 0;
-}
-
-SEC("kretprobe/inet_csk_accept")
-int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
-	const char fmt_str[] = "inet_csk_accept(ret)\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
-	u64 pid = bpf_get_current_pid_tgid();
-	struct sock *sk = (struct sock *)PT_REGS_RC(ctx);
-	struct nKey k;
-	__builtin_memset(&k, 0, sizeof(struct nKey));
-
-	if (setNKey4Tuple(&k, sk) == -1) {
-		return -1;
-	}
-	k.pid = pid;
-
-	struct tcp_sock *ts = (struct tcp_sock*)sk;
-	struct statusValue *v;
-	v = bpf_map_lookup_elem(&statusMap, &k);
-
-	if (v != NULL) {
-		u32 tSrtt;
-		u32 tMdev;
-
-		bpf_probe_read_kernel(&tSrtt, sizeof(tSrtt), &ts->srtt_us);
-		bpf_probe_read_kernel(&tMdev, sizeof(tMdev), &ts->mdev_us);
-
-		v->srtt = (v->srtt * v->totalCount + tSrtt) / (v->totalCount + 1);
-		v->mdev_us = (v->mdev_us * v->totalCount + tMdev) / (v->totalCount + 1);
-
-		v->totalCount++;
-		v->connectCount++;
-
-		bpf_map_update_elem(&statusMap, &k, v, BPF_ANY);
-
-	} else {
-		struct statusValue v;
-		// TODO : Check, memset 없는 경우permision denied
-		// https://github.com/iovisor/bcc/issues/2623
-		__builtin_memset(&v, 0, sizeof(struct statusValue));
-
-		bpf_probe_read_kernel(&v.srtt, sizeof(v.srtt), &ts->srtt_us);
-		bpf_probe_read_kernel(&v.mdev_us, sizeof(v.mdev_us), &ts->mdev_us);
-		v.connectCount = 1;
-		v.totalCount = 1;
-		v.bound = INBOUND;
-		bpf_map_update_elem(&statusMap, &k, &v, BPF_ANY);
-	}
-
-
-	return 0;
-}
-
-#if 1
 SEC("kprobe/tcp_connect")
 int kprobe__tcp_connect(struct pt_regs *ctx)
 {
@@ -322,17 +165,8 @@ int kretprobe__tcp_connect(struct pt_regs *ctx)
 	v = bpf_map_lookup_elem(&statusMap, &k);
 
 	if (v != NULL) {
-		u32 tSrtt;
-		u32 tMdev;
-
-		bpf_probe_read_kernel(&tSrtt, sizeof(tSrtt), &ts->srtt_us);
-		bpf_probe_read_kernel(&tMdev, sizeof(tMdev), &ts->mdev_us);
-
-		v->srtt = (v->srtt * v->totalCount + tSrtt) / (v->totalCount + 1);
-		v->mdev_us = (v->mdev_us * v->totalCount + tMdev) / (v->totalCount + 1);
-
-		v->totalCount++;
-		v->connectCount++;
+		__sync_fetch_and_add(&v->connectCount, 1);
+		v->status = TCP_SYN_SENT;
 		bpf_map_update_elem(&statusMap, &k, v, BPF_ANY);
 
 	} else {
@@ -341,11 +175,9 @@ int kretprobe__tcp_connect(struct pt_regs *ctx)
 		// https://github.com/iovisor/bcc/issues/2623
 		__builtin_memset(&v, 0, sizeof(struct statusValue));
 
-		bpf_probe_read_kernel(&v.srtt, sizeof(v.srtt), &ts->srtt_us);
-		bpf_probe_read_kernel(&v.mdev_us, sizeof(v.mdev_us), &ts->mdev_us);
 		v.connectCount = 1;
-		v.totalCount = 1;
 		v.bound = OUTBOUND;
+		v.status = TCP_SYN_SENT;
 		bpf_map_update_elem(&statusMap, &k, &v, BPF_ANY);
 	}
 
@@ -354,76 +186,107 @@ int kretprobe__tcp_connect(struct pt_regs *ctx)
 	return 0;
 }
 
-#else
-
-SEC("kprobe/tcp_v4_connect")
-int kprobe__tcp_v4_connect(struct pt_regs *ctx)
-{
-	const char fmt_str[] = "tcp_v4_connect\n";
+SEC("kprobe/inet_csk_accept")
+int kprobe__inet_csk_accept(struct pt_regs* ctx) {
+	const char fmt_str[] = "inet_csk_accept\n";
 	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 
 	struct sock *sk;
-	u64 pid = bpf_get_current_pid_tgid();
+	u64 pid_tgid = bpf_get_current_pid_tgid();
+	bpf_printk("tgid : %d, pid : %d", pid_tgid >> 32, pid_tgid & 0xFFFFFFFF);
 
 	sk = (struct sock *) PT_REGS_PARM1(ctx);
 
-	bpf_map_update_elem(&connectSock, &pid, &sk, BPF_ANY);
+	bpf_map_update_elem(&acceptSock, &pid_tgid, &sk, BPF_ANY);
+
 
 	return 0;
 }
 
-SEC("kretprobe/tcp_v4_connect")
-int kretprobe__tcp_v4_connect(struct pt_regs *ctx)
-{
-	const char fmt_str[] = "tcp_v4_connect(ret)\n";
+SEC("kretprobe/inet_csk_accept")
+int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
+	const char fmt_str[] = "inet_csk_accept(ret)\n";
 	bpf_trace_printk(fmt_str, sizeof(fmt_str));
+
 	u64 pid = bpf_get_current_pid_tgid();
-	struct sock **skpp;
-	skpp = bpf_map_lookup_elem(&connectSock, &pid);
-	if (skpp == 0) {
-		return 0;	// missed entry
-	}
-
-	struct sock *sk = *skpp;
-	bpf_map_delete_elem(&connectSock, &pid);
-	int ret = PT_REGS_RC(ctx);
-	if (ret != 0) {
-
-		// socket __sk_common.{skc_rcv_saddr, ...}
-		return 0;
-	}
-
-	short unsigned int family = 0;
-
-	bpf_probe_read_kernel(&family, sizeof(family), &(sk->__sk_common.skc_family));
-
+	struct sock *sk = (struct sock *)PT_REGS_RC(ctx);
 	struct nKey k;
-	struct statusValue v;
-	__builtin_memset(&v, 0, sizeof(struct statusValue));
+	__builtin_memset(&k, 0, sizeof(struct nKey));
 
-	struct tcp_sock *ts = (struct tcp_sock*)sk;
-
-	bpf_probe_read_kernel(&k.saddr, sizeof(k.saddr), &(sk->__sk_common.skc_rcv_saddr));
-	bpf_probe_read_kernel(&k.daddr, sizeof(k.daddr), &(sk->__sk_common.skc_daddr));
-	bpf_probe_read_kernel(&k.sport, sizeof(k.sport), &(sk->__sk_common.skc_num));
-	bpf_probe_read_kernel(&k.dport, sizeof(k.dport), &(sk->__sk_common.skc_dport));
-	k.dport = bpf_ntohs(k.dport);
+	if (setNKey4Tuple(&k, sk) == -1) {
+		return -1;
+	}
 	k.pid = pid;
 
-	bpf_probe_read_kernel(&v.srtt, sizeof(v.srtt), &ts->srtt_us);
-	v.srtt = 0;
-	//v.rttvar = 0;
-	v.status = 2;
+	struct tcp_sock *ts = (struct tcp_sock*)sk;
+	struct statusValue *v;
+	v = bpf_map_lookup_elem(&statusMap, &k);
 
-	bpf_map_update_elem(&statusMap, &k, &v, BPF_ANY);
+	if (v != NULL) {
+		__sync_fetch_and_add(&v->connectCount, 1);
+		__sync_fetch_and_add(&v->establishCount, 1);
+		v->status = TCP_ESTABLISHED;
+		bpf_map_update_elem(&statusMap, &k, v, BPF_ANY);
+	} else {
+		struct statusValue v;
+		// TODO : Check, memset 없는 경우permision denied
+		// https://github.com/iovisor/bcc/issues/2623
+		__builtin_memset(&v, 0, sizeof(struct statusValue));
+
+		v.connectCount = 1;
+		v.establishCount = 1;
+		v.bound = INBOUND;
+		v.status = TCP_ESTABLISHED;
+		bpf_map_update_elem(&statusMap, &k, &v, BPF_ANY);
+	}
+
+
 	return 0;
 }
-#endif
-SEC("kprobe/tcp_cleanup_rbuf")
-int kprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
-	const char fmt_str[] = "tcp_cleanup_rbuf\n";
+
+SEC("kprobe/tcp_set_state")
+int kprobe__tcp_set_state(struct pt_regs* ctx) {
+	const char fmt_str[] = "tcp_set_state\n";
 	bpf_trace_printk(fmt_str, sizeof(fmt_str));
 
+	u64 pid = bpf_get_current_pid_tgid();
+
+	struct sock *sk;
+	sk = (struct sock *) PT_REGS_PARM1(ctx);
+
+	u32 state;
+	state = PT_REGS_PARM2(ctx);
+
+	if (state != TCP_ESTABLISHED || state != TCP_CLOSE) {
+		return 1;
+	}
+
+	struct nKey k;
+	__builtin_memset(&k, 0, sizeof(struct nKey));
+
+	if (setNKey4Tuple(&k, sk) == -1) {
+		return -1;
+	}
+	k.pid = pid;
+	struct tcp_sock *ts = (struct tcp_sock*)sk;
+	struct statusValue *v;
+	v = bpf_map_lookup_elem(&statusMap, &k);
+
+
+	if (v != NULL) {
+		if (state == TCP_ESTABLISHED) {
+			__sync_fetch_and_add(&v->establishCount, 1);
+		} else if (state == TCP_CLOSE) {
+			__sync_fetch_and_add(&v->closeCount, 1);
+		}
+		v->status = state;
+	}
+
+	return 0;
+}
+
+SEC("kprobe/tcp_sendmsg")
+int kprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	struct sock *sk;
 	u64 pid = bpf_get_current_pid_tgid();
 
@@ -431,14 +294,12 @@ int kprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 
 	bpf_map_update_elem(&sendSock, &pid, &sk, BPF_ANY);
 
+
 	return 0;
 }
 
-SEC("kretprobe/tcp_cleanup_rbuf")
-int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
-	const char fmt_str[] = "tcp_cleanup_rbuf(ret)\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
+SEC("kretprobe/tcp_sendmsg")
+int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	u64 pid = bpf_get_current_pid_tgid();
 	struct sock **skpp;
 	skpp = bpf_map_lookup_elem(&sendSock, &pid);
@@ -449,6 +310,11 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 
 	struct sock *sk = *skpp;
 	bpf_map_delete_elem(&sendSock, &pid);
+
+	int send = PT_REGS_RC(ctx);
+	if (send < 0) {
+		return -1;
+	}
 
 	struct nKey k;
 	__builtin_memset(&k, 0, sizeof(struct nKey));
@@ -465,23 +331,125 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 	if (v != NULL) {
 		u32 tSrtt;
 		u32 tMdev;
-		u32 sByte;
-		u32 rByte;
+		u32 sPacket;
+		u32 rPacket;
 
 		bpf_probe_read_kernel(&tSrtt, sizeof(tSrtt), &ts->srtt_us);
 		bpf_probe_read_kernel(&tMdev, sizeof(tMdev), &ts->mdev_us);
 
-		v->srtt = (v->srtt * v->totalCount + tSrtt) / (v->totalCount + 1);
-		v->mdev_us = (v->mdev_us * v->totalCount + tMdev) / (v->totalCount + 1);
+		//https://elixir.bootlin.com/linux/v4.6/source/net/ipv4/tcp.c#L2686
+		v->srtt = tSrtt >> 3;
+		v->mdev = tMdev >> 2;
+		/*
+		tSrtt = (tSrtt >> 3);
+		tMdev = (tMdev >> 2);
 
-		v->totalCount++;
-		v->recvCount++;
+		v->srtt = (v->srtt + v->sendCount * tSrtt) / (v->sendCount + 1);
+		v->mdev_us = (v->mdev_us + v->sendCount * tMdev) / (v->sendCount + 1);
+		*/
+		__sync_fetch_and_add(&v->sendCount, 1);
 
-		bpf_probe_read_kernel(&sByte, sizeof(sByte), &ts->segs_out);
-		bpf_probe_read_kernel(&rByte, sizeof(rByte), &ts->segs_in);
-		
-		__sync_fetch_and_add(&v->sendByte, sByte);
-		__sync_fetch_and_add(&v->recvByte, rByte);
+		bpf_probe_read_kernel(&sPacket, sizeof(sPacket), &ts->segs_out);
+		bpf_probe_read_kernel(&rPacket, sizeof(rPacket), &ts->segs_in);
+
+		bpf_printk("tcp_sendmsg(ret) %d, %d\n", sPacket, rPacket);
+
+		u32 lostPacket;
+		u32 retransPacket;
+
+		bpf_probe_read_kernel(&lostPacket, sizeof(lostPacket), &ts->lost_out);
+		bpf_probe_read_kernel(&retransPacket, sizeof(retransPacket), &ts->retrans_out);
+
+		v->sendPacket = sPacket;
+		v->recvPacket = rPacket;
+		__sync_fetch_and_add(&v->sendByte, send);
+		__sync_fetch_and_add(&v->lostPacket, lostPacket);
+		__sync_fetch_and_add(&v->retransPacket, retransPacket);
+
+		bpf_map_update_elem(&statusMap, &k, v, BPF_ANY);
+	} else {
+		return -1;
+	}
+	return 0;
+}
+
+SEC("kprobe/tcp_cleanup_rbuf")
+int kprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
+	//const char fmt_str[] = "tcp_cleanup_rbuf\n";
+	//bpf_trace_printk(fmt_str, sizeof(fmt_str));
+
+	struct sock *sk;
+	u64 pid = bpf_get_current_pid_tgid();
+
+	sk = (struct sock *) PT_REGS_PARM1(ctx);
+
+	bpf_map_update_elem(&sendSock, &pid, &sk, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kretprobe/tcp_cleanup_rbuf")
+int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	struct sock **skpp;
+	skpp = bpf_map_lookup_elem(&sendSock, &pid);
+	if (skpp == 0) {
+
+		return -1;	// missed entry
+	}
+
+	struct sock *sk = *skpp;
+	bpf_map_delete_elem(&sendSock, &pid);
+	
+	int copied = PT_REGS_PARM2(ctx);
+	if (copied < 0) {
+		return -1;
+	}
+	struct nKey k;
+	__builtin_memset(&k, 0, sizeof(struct nKey));
+
+	if (setNKey4Tuple(&k, sk) == -1) {
+		return -1;
+	}
+	k.pid = pid;
+
+	struct tcp_sock *ts = (struct tcp_sock*)sk;
+	struct statusValue *v;
+	v = bpf_map_lookup_elem(&statusMap, &k);
+
+	if (v != NULL) {
+		u32 tSrtt;
+		u32 tMdev;
+		u32 rPacket;
+		u32 sPacket;
+
+		bpf_probe_read_kernel(&tSrtt, sizeof(tSrtt), &ts->srtt_us);
+		bpf_probe_read_kernel(&tMdev, sizeof(tMdev), &ts->mdev_us);
+
+		v->srtt = tSrtt >> 3;
+		v->mdev = tMdev >> 2;
+
+		/*
+		v->srtt = (v->srtt + v->recvCount * tSrtt) / (v->recvCount + 1);
+		v->mdev_us = (v->mdev_us + v->recvCount * tMdev) / (v->recvCount + 1);
+		*/
+		__sync_fetch_and_add(&v->recvCount, 1);
+
+		bpf_probe_read_kernel(&sPacket, sizeof(sPacket), &ts->segs_out);
+		bpf_probe_read_kernel(&rPacket, sizeof(rPacket), &ts->segs_in);
+
+		bpf_printk("tcp_cleanup_rbuf(ret) %d, %d\n", sPacket, rPacket);
+
+		u32 lostPacket;
+		u32 retransPacket;
+		bpf_probe_read_kernel(&lostPacket, sizeof(lostPacket), &ts->lost_out);
+		bpf_probe_read_kernel(&retransPacket, sizeof(retransPacket), &ts->retrans_out);
+
+		v->sendPacket = sPacket;
+		v->recvPacket = rPacket;
+		__sync_fetch_and_add(&v->recvByte, copied);
+		__sync_fetch_and_add(&v->lostPacket, lostPacket);
+		__sync_fetch_and_add(&v->retransPacket, retransPacket);
 		
 
 		bpf_map_update_elem(&statusMap, &k, v, BPF_ANY);
@@ -490,14 +458,49 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 		return -1;
 	}
 
-
-
-
-
 	return 0;
 }
 
 
+SEC("kprobe/tcp_close")
+int kprobe__tcp_close(struct pt_regs *ctx) {
+	const char fmt_str[] = "tcp_close\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
+
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("tgid : %d, pid : %d", pid >> 32, pid & 0xFFFFFFFF);
+
+	struct sock *sk;
+	sk = (struct sock *) PT_REGS_PARM1(ctx);
+
+	struct nKey k;
+	__builtin_memset(&k, 0, sizeof(struct nKey));
+
+	if (setNKey4Tuple(&k, sk) == -1) {
+		return -1;
+	}
+	k.pid = pid;
+
+
+	struct tcp_sock *ts = (struct tcp_sock*)sk;
+	struct statusValue *v;
+	v = bpf_map_lookup_elem(&statusMap, &k);
+
+	if (v != NULL) {
+		v->status = TCP_CLOSE;
+		__sync_fetch_and_add(&v->closeCount, 1);
+		bpf_map_update_elem(&statusMap, &k, v, BPF_ANY);
+	}
+
+	return 0;
+}
+SEC("kprobe/tcp_sendpage")
+int kprobe__tcp_sendpage(struct pt_regs *ctx) {
+	const char fmt_str[] = "tcp_sendpage\n";
+	bpf_trace_printk(fmt_str, sizeof(fmt_str));
+	return 0;
+
+}
 
 SEC("kprobe/tcp_retransmit_skb")
 int kprobe__tcp_retransmit_skb(struct pt_regs *ctx) {
