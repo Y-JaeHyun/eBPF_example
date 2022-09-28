@@ -36,11 +36,13 @@ static int setProcessSessionKey(ProcessSessionKey *key, struct sock *sk) {
 		bpf_probe_read_kernel(&key->fourTuple.sip.saddr, sizeof(key->fourTuple.sip.saddr), &(sk->__sk_common.skc_rcv_saddr));
 		bpf_probe_read_kernel(&key->fourTuple.dip.daddr, sizeof(key->fourTuple.dip.daddr), &(sk->__sk_common.skc_daddr));
 		ret = ETH_P_IP;
+		key->fourTuple.ipv = 4;
  
 	} else if (family == AF_INET6){
 		bpf_probe_read_kernel(&key->fourTuple.sip.saddrv6, sizeof(key->fourTuple.sip.saddrv6), &(sk->__sk_common.skc_v6_rcv_saddr));
 		bpf_probe_read_kernel(&key->fourTuple.dip.daddrv6, sizeof(key->fourTuple.dip.daddrv6), &(sk->__sk_common.skc_v6_daddr));
 		ret = ETH_P_IPV6;
+		key->fourTuple.ipv = 6;
 	} else {
 		return BPF_RET_ERROR;
 	}
