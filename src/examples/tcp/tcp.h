@@ -117,13 +117,16 @@ struct {
 	__uint(max_entries, 1024);
 } tcpStateMap SEC(".maps");
 
+/*
+ * 현재는 미사용, agent에서 알아서 삭제 하도록 처리
+ *
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(key_size, sizeof(ProcessSessionKey));
 	__uint(value_size, sizeof(CloseStateValue));
 	__uint(max_entries, 1024);
 } closeStateMap SEC(".maps");
-
+*/
 // ETC //
 
 

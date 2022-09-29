@@ -31,6 +31,17 @@ const (
 	intervalTime = 5
 )
 
+const (
+	TCP_ESTABLISHED = 1
+	TCP_SYN_SENT    = 2
+	TCP_SYN_RECV    = 3
+	TCP_FIN_WAIT1   = 4
+	TCP_FIN_WAIT2   = 5
+	TCP_TIME_WAIT   = 6
+	TCP_CLOSE       = 7
+	TCP_LISTEN      = 10
+)
+
 var (
 	oldDataMap = make(map[bpfProcessSessionKey]*stateData)
 )
@@ -152,12 +163,36 @@ func sendTcpPack(key *bpfProcessSessionKey, tcpState *bpfTcpStateValue, onewayCl
 	return nil
 }
 
+// 4Tuple 기준으로 Close 된 모든 항목을 삭제해야함
+// TODO 매번 모든 Key값을 검토해야하기 떄문에 성능상 문제가 있을수 있음, 개선 필요
+// TODO2 일반적인 상황이 아니라 close 등의 이벤트를 받지 못하면 Delete 가 영원히 지속됨
+func deleteDataWithFourTuple(keys []*bpfProcessSessionKey, objs bpfObjects) {
+	var mKey bpfProcessSessionKey
+	var sessionState bpfSessionStateValue
+
+	for _, dKey := range keys {
+		iter := objs.SessionStateMap.Iterate()
+		for {
+			ret := iter.Next(&mKey, &sessionState)
+			if !ret {
+				break
+			}
+
+			if cmp.Equal(mKey.FourTuple, dKey.FourTuple) {
+				objs.SessionStateMap.Delete(mKey)
+				objs.TcpStateMap.Delete(mKey)
+			}
+		}
+	}
+}
+
 func getIntervalData(objs bpfObjects, onewayClient *oneway.OneWayTcpClient) {
 	var key bpfProcessSessionKey
 	var sessionState bpfSessionStateValue
 	var tcpState bpfTcpStateValue
 	//var closeState bpfCloseStateValue
 
+	deleteTuple := make([]*bpfProcessSessionKey, 0)
 	iter := objs.SessionStateMap.Iterate()
 	for {
 		sData := &stateData{}
@@ -167,14 +202,22 @@ func getIntervalData(objs bpfObjects, onewayClient *oneway.OneWayTcpClient) {
 		}
 		objs.TcpStateMap.Lookup(key, &tcpState)
 
+		if tcpState.State&(1<<TCP_CLOSE) > 0 {
+			deleteTuple = append(deleteTuple, &key)
+			//objs.SessionStateMap.Delete(key)
+			//objs.TcpStateMap.Delete(key)
+		}
+
 		if oldDataMap[key] == nil {
 			sData.SessionState = sessionState
 			sData.TcpState = tcpState
 			oldDataMap[key] = sData
 		} else {
-			if cmp.Equal(oldDataMap[key].SessionState, sessionState) && cmp.Equal(oldDataMap[key].TcpState, tcpState) {
+			//Session State 변화가 없으면 Tcp State도 의미없음
+			if cmp.Equal(oldDataMap[key].SessionState, sessionState) {
 				continue
 			}
+
 			sData.SessionState = diffSessionState(sessionState, oldDataMap[key].SessionState)
 			sData.TcpState = diffTcpState(tcpState, oldDataMap[key].TcpState)
 
@@ -182,11 +225,13 @@ func getIntervalData(objs bpfObjects, onewayClient *oneway.OneWayTcpClient) {
 			oldDataMap[key].TcpState = tcpState
 		}
 
-		sendSessionPack(&key, &sData.SessionState, onewayClient)
-		sendTcpPack(&key, &sData.TcpState, onewayClient)
-
+		if sData.SessionState.SendCount > 0 || sData.SessionState.RecvCount > 0 {
+			sendSessionPack(&key, &sData.SessionState, onewayClient)
+			sendTcpPack(&key, &sData.TcpState, onewayClient)
+		}
 	}
 
+	deleteDataWithFourTuple(deleteTuple, objs)
 }
 
 func checkTime(interval int, objs bpfObjects, onewayClient *oneway.OneWayTcpClient) {

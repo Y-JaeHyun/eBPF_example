@@ -145,9 +145,6 @@ static int setTCPState(ProcessSessionKey *key, struct tcp_sock *ts, u16 state) {
 
 SEC("kretprobe/inet_csk_accept")
 int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
-	const char fmt_str[] = "inet_csk_accept(ret)\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
 	struct sock *sk = (struct sock *)PT_REGS_RC(ctx);
 	if (sk == NULL) {
 		return BPF_RET_ERROR;
@@ -165,31 +162,23 @@ int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
 
 	bpf_map_update_elem(&bindCheckMap, &key.fourTuple, &bindValue, BPF_ANY);
 
-	return 0;
+	bpf_printk("inet_csk_accept(ret) - %d\n", key.pid);
+	return BPF_RET_OK;
 }
 
 SEC("kprobe/tcp_connect")
-int kprobe__tcp_connect(struct pt_regs *ctx)
-{
-	const char fmt_str[] = "tcp_connect\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
+int kprobe__tcp_connect(struct pt_regs *ctx) {
 	struct sock *sk;
 	u64 pid = bpf_get_current_pid_tgid();
 
 	sk = (struct sock *) PT_REGS_PARM1(ctx);
 
 	bpf_map_update_elem(&connectSock, &pid, &sk, BPF_ANY);
-
-	return 0;
+	return BPF_RET_OK;
 }
 
 SEC("kretprobe/tcp_connect")
-int kretprobe__tcp_connect(struct pt_regs *ctx)
-{
-	const char fmt_str[] = "tcp_connect(ret)\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-	
+int kretprobe__tcp_connect(struct pt_regs *ctx) {
 	u64 pid = bpf_get_current_pid_tgid();
 	struct sock **skpp;
 	skpp = bpf_map_lookup_elem(&connectSock, &pid);
@@ -226,15 +215,13 @@ int kretprobe__tcp_connect(struct pt_regs *ctx)
 		return BPF_RET_ERROR;
 	}
 
+	bpf_printk("tcp_connect(ret) - %d\n", key.pid);
 	return BPF_RET_OK;
 }
 
 
 SEC("kprobe/tcp_finish_connect")
 int kprobe__tcp_finish_connect(struct pt_regs* ctx) {
-	const char fmt_str[] = "tcp_finish_connect\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-	return 0;
 	struct sock *sk;
 	sk = (struct sock *) PT_REGS_PARM1(ctx);
 	if (sk == NULL) {
@@ -247,21 +234,18 @@ int kprobe__tcp_finish_connect(struct pt_regs* ctx) {
 		return BPF_RET_ERROR;
 	}
 
-
 	u8 state = TCP_ESTABLISHED;
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
 	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
 
+	bpf_printk("tcp_finish_connect - %d\n", key.pid);
 	return BPF_RET_OK;
 }
 
 SEC("kprobe/tcp_set_state")
 int kprobe__tcp_set_state(struct pt_regs* ctx) {
-	const char fmt_str[] = "tcp_set_state\n";
-	bpf_trace_printk(fmt_str, sizeof(fmt_str));
-
 	u64 pid = bpf_get_current_pid_tgid();
 
 	struct sock *sk;
@@ -288,7 +272,8 @@ int kprobe__tcp_set_state(struct pt_regs* ctx) {
 		return BPF_RET_ERROR;
 	}
 
-	return 0;
+	bpf_printk("tcp_set_state - %d\n", key.pid);
+	return BPF_RET_OK;
 }
 
 
@@ -343,7 +328,6 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 
 	int ret;
 	if ((ret = setSessionState(&key, ipv, IPPROTO_TCP, UNKNOWN, sendByte, sendCount, recvByte, recvCount)) != BPF_RET_OK) {
-		//bpf_printk("setSessionState Ret %d\n", ret);
 		return BPF_RET_ERROR;
 	}
 
@@ -355,7 +339,7 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
-	bpf_printk("tcp_sendmsg(ret)\n");
+	bpf_printk("tcp_sendmsg(ret) - %d\n", key.pid);
 	return BPF_RET_OK;
 }
 
@@ -386,11 +370,11 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 		return BPF_RET_ERROR;
 	}
 	
-	u32 recvByte = PT_REGS_PARM2(ctx);
+	int recvByte = PT_REGS_PARM2(ctx);
 	if (recvByte < 0) {
 		return BPF_RET_ERROR;
 	}
-	u32 sendByte = 0;
+	int sendByte = 0;
 
 	ProcessSessionKey key;
 	int ipv;
@@ -422,10 +406,9 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
-	bpf_printk("tcp_cleanup_rbuf(ret)\n");
+	bpf_printk("tcp_cleanup_rbuf(ret) - %d\n", key.pid);
 	return BPF_RET_OK;
 }
-
 
 SEC("kprobe/tcp_close")
 int kprobe__tcp_close(struct pt_regs *ctx) {
@@ -454,20 +437,20 @@ int kprobe__tcp_close(struct pt_regs *ctx) {
 	if (sValue == NULL) {
 		return BPF_RET_ERROR;
 	}
-	__builtin_memcpy(&closeValue.sessionState, sValue, sizeof(closeValue.sessionState));
-	bpf_map_delete_elem(&sessionStateMap, &key);
+	//__builtin_memcpy(&closeValue.sessionState, sValue, sizeof(closeValue.sessionState));
+	//bpf_map_delete_elem(&sessionStateMap, &key);
 
 	TCPStateValue *tcpValue = bpf_map_lookup_elem(&tcpStateMap, &key);
 	if (tcpValue == NULL) {
 		return BPF_RET_ERROR;
 	}
 	tcpValue->state |= (1 << TCP_CLOSE);
-	__builtin_memcpy(&closeValue.tcpState, tcpValue, sizeof(closeValue.tcpState));
-	bpf_map_delete_elem(&tcpStateMap, &key);
+	//__builtin_memcpy(&closeValue.tcpState, tcpValue, sizeof(closeValue.tcpState));
+	//bpf_map_delete_elem(&tcpStateMap, &key);
 
-	bpf_map_update_elem(&closeStateMap, &key, &closeValue, BPF_ANY);
+	//bpf_map_update_elem(&closeStateMap, &key, &closeValue, BPF_ANY);
 
-	return 0;
+	return BPF_RET_OK;
 }
 
 SEC("kprobe/inet_csk_listen_stop")
@@ -497,18 +480,18 @@ int kprobe__inet_csk_listen_stop(struct pt_regs *ctx) {
 	if (sValue == NULL) {
 		return BPF_RET_ERROR;
 	}
-	__builtin_memcpy(&closeValue.sessionState, sValue, sizeof(closeValue.sessionState));
-	bpf_map_delete_elem(&sessionStateMap, &key);
+	//__builtin_memcpy(&closeValue.sessionState, sValue, sizeof(closeValue.sessionState));
+	//bpf_map_delete_elem(&sessionStateMap, &key);
 
 	TCPStateValue *tcpValue = bpf_map_lookup_elem(&tcpStateMap, &key);
 	if (tcpValue == NULL) {
 		return BPF_RET_ERROR;
 	}
 	tcpValue->state |= (1 << TCP_CLOSE);
-	__builtin_memcpy(&closeValue.tcpState, tcpValue, sizeof(closeValue.tcpState));
-	bpf_map_delete_elem(&tcpStateMap, &key);
+	//__builtin_memcpy(&closeValue.tcpState, tcpValue, sizeof(closeValue.tcpState));
+	//bpf_map_delete_elem(&tcpStateMap, &key);
 
-	bpf_map_update_elem(&closeStateMap, &key, &closeValue, BPF_ANY);
+	//bpf_map_update_elem(&closeStateMap, &key, &closeValue, BPF_ANY);
 
 	return 0;
 
