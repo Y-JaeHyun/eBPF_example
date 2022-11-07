@@ -325,6 +325,9 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	u32 recvCount;
 
 	getTCPPacketCount(ts, &sendCount, &recvCount);
+	if (sendCount == (u32)-1 || recvCount == (u32)-1) {
+		return BPF_RET_ERROR;
+	}
 
 	int ret;
 	if ((ret = setSessionState(&key, ipv, IPPROTO_TCP, UNKNOWN, sendByte, sendCount, recvByte, recvCount)) != BPF_RET_OK) {
@@ -392,6 +395,9 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 	u32 recvCount;
 
 	getTCPPacketCount(ts, &sendCount, &recvCount);
+	if (sendCount == (u32)-1 || recvCount == (u32)-1) {
+		return BPF_RET_ERROR;
+	}
 
 	int ret;
 	if ((ret = setSessionState(&key, ipv, IPPROTO_TCP, UNKNOWN, sendByte, sendCount, recvByte, recvCount)) != BPF_RET_OK) {
