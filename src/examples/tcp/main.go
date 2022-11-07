@@ -141,7 +141,7 @@ func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap 
 	p.PutTag("SourcePort", fmt.Sprintf("%d", key.FourTuple.Sport))
 	p.PutTag("DestinationPort", fmt.Sprintf("%d", key.FourTuple.Dport))
 	if key.FourTuple.Ipv == 4 {
-		sourceIP := int2ip(key.FourTuple.Sip.Saddr).String()
+		sourceIP := int2ip(key.FourTuple.Saddr).String()
 		if resourceInfo, ok := resourceMap[sourceIP]; ok {
 			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
 			p.PutTag("SourceType", resourceInfo.resourceType)
@@ -151,7 +151,7 @@ func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap 
 			p.PutTag("SourceName", "Unknown")
 		}
 		p.PutTag("SourceIp", sourceIP)
-		destinationIP := int2ip(key.FourTuple.Dip.Daddr).String()
+		destinationIP := int2ip(key.FourTuple.Daddr).String()
 		if resourceInfo, ok := resourceMap[destinationIP]; ok {
 			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
 			p.PutTag("DestinationType", resourceInfo.resourceType)
@@ -161,7 +161,8 @@ func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap 
 			p.PutTag("DestinationName", "Unknown")
 		}
 		p.PutTag("DestinationIp", destinationIP)
-	} else {
+	} else if key.FourTuple.Ipv == 6 {
+		fmt.Println(key)
 		// TODO
 		return errors.New("TODO")
 	}
@@ -174,7 +175,7 @@ func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap m
 	p.PutTag("SourcePort", fmt.Sprintf("%d", key.FourTuple.Dport))
 	p.PutTag("DestinationPort", fmt.Sprintf("%d", key.FourTuple.Sport))
 	if key.FourTuple.Ipv == 4 {
-		sourceIP := int2ip(key.FourTuple.Sip.Saddr).String()
+		sourceIP := int2ip(key.FourTuple.Saddr).String()
 		if resourceInfo, ok := resourceMap[sourceIP]; ok {
 			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
 			p.PutTag("DestinationType", resourceInfo.resourceType)
@@ -184,7 +185,7 @@ func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap m
 			p.PutTag("DestinationName", "Unknown")
 		}
 		p.PutTag("DestinationIp", sourceIP)
-		destinationIP := int2ip(key.FourTuple.Dip.Daddr).String()
+		destinationIP := int2ip(key.FourTuple.Daddr).String()
 		if resourceInfo, ok := resourceMap[destinationIP]; ok {
 			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
 			p.PutTag("SourceType", resourceInfo.resourceType)
@@ -443,8 +444,8 @@ func main() {
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
 	servers := make([]string, 0)
-	servers = append(servers, "")
-	accessKey := ""
+	servers = append(servers, "15.165.146.117:6600")
+	accessKey := "x2jgg66m4jlck-z6l4o2nb3cckq0-x5jfk4ktaqmfth"
 
 	pcode, _ = Parse(accessKey)
 
@@ -501,6 +502,10 @@ func main() {
 		"tcp_close":            objs.KprobeTcpClose,
 		"inet_csk_listen_stop": objs.KprobeInetCskListenStop,
 		"tcp_finish_connect":   objs.KprobeTcpFinishConnect,
+		"inet_bind":            objs.KprobeInetBind,
+		"ip_make_skb":          objs.KprobeIpMakeSkb,
+		"udp_recvmsg":          objs.KprobeUdpRecvmsg,
+		"skb_consume_udp":      objs.KprobeSkbConsumeUdp,
 	}
 
 	var kretprobeMap = map[string]*ebpf.Program{
@@ -508,6 +513,10 @@ func main() {
 		"inet_csk_accept":  objs.KretprobeInetCskAccept,
 		"tcp_sendmsg":      objs.KretprobeTcpSendmsg,
 		"tcp_cleanup_rbuf": objs.KretprobeTcpCleanupRbpf,
+		//"inet_bind":        objs.KretprobeInetBind,
+		"ip_make_skb":     objs.KretprobeIpMakeSkb,
+		"udp_recvmsg":     objs.KretprobeUdpRecvmsg,
+		"skb_consume_udp": objs.KretprobeSkbConsumeUdp,
 	}
 
 	linkSlice := make([]link.Link, 0)

@@ -7,7 +7,6 @@
 #include "bpf_endian.h"
 #include "bpf_tracing.h"
 
-
 // LICENSE //
 
 char __license[] SEC("license") = "GPL";
@@ -17,14 +16,12 @@ char __license[] SEC("license") = "GPL";
 typedef struct fourTupleKey {
 	u16 sport;
 	u16 dport;
-	union {
-		u32 saddr;
-		u8 saddrv6[16];
-	}sip;
-	union {
-		u32 daddr;
-		u8 daddrv6[16];
-	}dip;
+
+	// union(addr + addrv6) 사용시 ipv6 정보가 누락되는 현상 있음
+	u32 saddr;
+	u32 daddr;
+	struct in6_addr saddrv6;
+	struct in6_addr daddrv6;
 	u8 ipv;
 }FourTupleKey;
 
@@ -36,16 +33,6 @@ typedef struct bindCheckValue {
 
 
 typedef struct processSessionKey {
-	/*u16 sport;
-	u16 dport;
-	union {
-		u32 saddr;
-		u8 saddrv6[16];
-	}sip;
-	union {
-		u32 daddr;
-		u8 daddrv6[16];
-	}dip;*/
 	FourTupleKey fourTuple;
 	u32 pid;
 }ProcessSessionKey;
@@ -84,6 +71,15 @@ typedef struct closeStateValue {
 	TCPStateValue tcpState;
 }CloseStateValue;
 
+
+typedef struct udp_args {
+	struct sock *sk;
+	int len;
+	struct flowi4 *fl4;
+}UdpArgs;
+
+
+
 struct forTupleKey *unused_four_tuple_key_t  __attribute__((unused));
 struct bindCheckValue *unused_bind_Check_value_t  __attribute__((unused));
 
@@ -95,6 +91,8 @@ struct closeStateValue *unused_close_state_value_t  __attribute__((unused));
 
 
 // MAP //
+
+
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -117,16 +115,14 @@ struct {
 	__uint(max_entries, 1024);
 } tcpStateMap SEC(".maps");
 
-/*
- * 현재는 미사용, agent에서 알아서 삭제 하도록 처리
- *
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(ProcessSessionKey));
-	__uint(value_size, sizeof(CloseStateValue));
+	__uint(key_size, sizeof(u16));
+	__uint(value_size, sizeof(BindCheckValue));
 	__uint(max_entries, 1024);
-} closeStateMap SEC(".maps");
-*/
+} udpBindCheckMap SEC(".maps");
+
+
 // ETC //
 
 
