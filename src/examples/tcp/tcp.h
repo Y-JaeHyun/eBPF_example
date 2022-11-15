@@ -45,6 +45,14 @@ typedef struct processSessionKey {
 #define ETH_P_IP 0x8000
 #define ETH_P_IPV6 0x86DD
 
+#define MAX_PID_LIST 5
+
+typedef struct sessionInfo {
+	u16 state;
+	u32 pid[MAX_PID_LIST];
+	u8 bindState;
+}SessionInfo;
+
 typedef struct sessionStateValue {
 	u16 ether;
 	u8 direction;
@@ -61,7 +69,7 @@ typedef struct tcpStateValue {
 	u32 lostCount;
 	u32 latency;
 	u32 jitter;
-	u16 state;
+	//u16 state;
 }TCPStateValue;
 
 #define SESSION_INFO 1
@@ -94,12 +102,21 @@ struct closeStateValue *unused_close_state_value_t  __attribute__((unused));
 
 
 
+/*
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(key_size, sizeof(FourTupleKey));
 	__uint(value_size, sizeof(BindCheckValue));
 	__uint(max_entries, 1024);
 } bindCheckMap SEC(".maps");
+*/
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(FourTupleKey));
+	__uint(value_size, sizeof(SessionInfo));
+	__uint(max_entries, 1024);
+} sessionInfoMap SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -114,6 +131,13 @@ struct {
 	__uint(value_size, sizeof(TCPStateValue));
 	__uint(max_entries, 1024);
 } tcpStateMap SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(ProcessSessionKey));
+	__uint(value_size, sizeof(CloseStateValue));
+	__uint(max_entries, 1024);
+} closeStateMap SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);

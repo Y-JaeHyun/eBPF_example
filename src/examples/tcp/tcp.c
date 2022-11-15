@@ -33,36 +33,111 @@ struct {
 
 
 ///
+
 __attribute__((always_inline))
-static int setProcessSessionKey(ProcessSessionKey *key, struct sock *sk) {
+static int setFourTupleKey(FourTupleKey *key, struct sock *sk) {
 	short unsigned int family = 0;
 	int ret = 0;
+	
 	bpf_probe_read_kernel(&family, sizeof(family), &(sk->__sk_common.skc_family));
-
 	if (family == AF_INET) {
-		bpf_probe_read_kernel(&key->fourTuple.saddr, sizeof(key->fourTuple.saddr), &(sk->__sk_common.skc_rcv_saddr));
-		bpf_probe_read_kernel(&key->fourTuple.daddr, sizeof(key->fourTuple.daddr), &(sk->__sk_common.skc_daddr));
+		bpf_probe_read_kernel(&key->saddr, sizeof(key->saddr), &(sk->__sk_common.skc_rcv_saddr));
+		bpf_probe_read_kernel(&key->daddr, sizeof(key->daddr), &(sk->__sk_common.skc_daddr));
 		ret = ETH_P_IP;
-		key->fourTuple.ipv = 4;
+		key->ipv = 4;
  
 	} else if (family == AF_INET6){
-		bpf_probe_read_kernel(&key->fourTuple.saddrv6, sizeof(key->fourTuple.saddrv6), &(sk->__sk_common.skc_v6_rcv_saddr));
-		bpf_probe_read_kernel(&key->fourTuple.daddrv6, sizeof(key->fourTuple.daddrv6), &(sk->__sk_common.skc_v6_daddr));
+		bpf_probe_read_kernel(&key->saddrv6, sizeof(key->saddrv6), &(sk->__sk_common.skc_v6_rcv_saddr));
+		bpf_probe_read_kernel(&key->daddrv6, sizeof(key->daddrv6), &(sk->__sk_common.skc_v6_daddr));
 		ret = ETH_P_IPV6;
-		key->fourTuple.ipv = 6;
+		key->ipv = 6;
 	} else {
-		bpf_printk("error : %d", family);
 		return BPF_RET_ERROR;
 	}
 
 
-	bpf_probe_read_kernel(&key->fourTuple.sport, sizeof(key->fourTuple.sport), &(sk->__sk_common.skc_num));
-	bpf_probe_read_kernel(&key->fourTuple.dport, sizeof(key->fourTuple.dport), &(sk->__sk_common.skc_dport));
-	key->fourTuple.dport = bpf_ntohs(key->fourTuple.dport);
+	bpf_probe_read_kernel(&key->sport, sizeof(key->sport), &(sk->__sk_common.skc_num));
+	bpf_probe_read_kernel(&key->dport, sizeof(key->dport), &(sk->__sk_common.skc_dport));
+	key->dport = bpf_ntohs(key->dport);
 
+	return ret;
+
+}
+
+__attribute__((always_inline))
+static int setProcessSessionKey(ProcessSessionKey *key, struct sock *sk) {
 	u64 pid = bpf_get_current_pid_tgid();
 	key->pid = pid;
+
+	int ret = setFourTupleKey(&key->fourTuple, sk);
 	return ret;
+}
+
+
+__attribute__((always_inline))
+static int closeSessionFunc(struct sock *sk) {
+	ProcessSessionKey pKey = {0, };
+	int ret = setFourTupleKey(&pKey.fourTuple, sk);
+	if (ret != BPF_RET_OK) {
+		return ret;
+	}
+
+	SessionInfo *sInfo = bpf_map_lookup_elem(&sessionInfoMap, &pKey.fourTuple);
+	if (sInfo == NULL) {
+		return BPF_RET_ERROR;
+	}
+
+	int i = 0;
+	for (i = 0; i < MAX_PID_LIST; i++) {
+
+		bpf_probe_read_kernel(&pKey.pid, sizeof(u32), &sInfo->pid[i]);
+		if (pKey.pid == 0) break;
+
+		CloseStateValue dummy;
+		__builtin_memset(&dummy, 0, sizeof(CloseStateValue));
+		bpf_map_update_elem(&closeStateMap, &pKey, &dummy, BPF_NOEXIST);
+
+		CloseStateValue *closeState = bpf_map_lookup_elem(&closeStateMap, &pKey);
+		if (closeState == NULL) {
+			continue;
+		}
+
+
+		SessionStateValue *sValue = bpf_map_lookup_elem(&sessionStateMap, &pKey);
+		if (sValue == NULL) {
+			continue;
+		}
+
+		closeState->sessionState.ether = sValue->ether;
+		closeState->sessionState.direction = sValue->direction;
+		closeState->sessionState.protocol = sValue->protocol;
+		closeState->sessionState.sendCount += sValue->sendCount;
+		closeState->sessionState.recvCount += sValue->recvCount;
+		closeState->sessionState.sendByte += sValue->sendByte;
+		closeState->sessionState.recvByte += sValue->recvByte;
+
+		bpf_map_delete_elem(&sessionStateMap, &pKey);
+
+		TCPStateValue *tcpValue = bpf_map_lookup_elem(&tcpStateMap, &pKey);
+		if (tcpValue == NULL) {
+			continue;
+		}
+
+		closeState->tcpState.retransCount += tcpValue->retransCount;
+		closeState->tcpState.lostCount += tcpValue->lostCount;
+		if (closeState->tcpState.latency < tcpValue->latency) {
+			closeState->tcpState.latency = tcpValue->latency;
+		}
+		if (closeState->tcpState.jitter < tcpValue->jitter) {
+			closeState->tcpState.jitter = tcpValue->jitter;
+		}
+
+		bpf_map_delete_elem(&tcpStateMap, &pKey);
+	}
+
+	bpf_map_delete_elem(&sessionInfoMap, &pKey.fourTuple);
+	return BPF_RET_OK;
+
 }
 
 __attribute__((always_inline))
@@ -82,8 +157,8 @@ static int setSessionState(ProcessSessionKey *key,u16 ether, u8 protocol, u8 dir
 
 	if (sValue->direction == UNKNOWN) {
 		if (direction == UNKNOWN) {
-			BindCheckValue *bindCheckValue = bpf_map_lookup_elem(&bindCheckMap, &key->fourTuple);
-			if (bindCheckValue != NULL && bindCheckValue->bindState == BIND) {
+			SessionInfo *sessionInfo = bpf_map_lookup_elem(&sessionInfoMap, &key->fourTuple);
+			if (sessionInfo != NULL && sessionInfo->bindState == BIND) {
 				sValue->direction = IN;
 			} else {
 				//TODO 변경 가능성 검토
@@ -122,7 +197,7 @@ static int setSessionState(ProcessSessionKey *key,u16 ether, u8 protocol, u8 dir
 }
 
 __attribute__((always_inline))
-static int setTCPState(ProcessSessionKey *key, struct tcp_sock *ts, u16 state) {
+static int setTCPState(ProcessSessionKey *key, struct tcp_sock *ts) {
 	TCPStateValue dummy;
 	__builtin_memset(&dummy, 0, sizeof(TCPStateValue));
 	bpf_map_update_elem(&tcpStateMap, key, &dummy, BPF_NOEXIST);
@@ -142,7 +217,7 @@ static int setTCPState(ProcessSessionKey *key, struct tcp_sock *ts, u16 state) {
 	tcpValue->latency = tSrtt >> 3;
 	tcpValue->jitter = tMdev >> 2;
 
-	tcpValue->state |= (1 << state);
+	//tcpValue->state |= (1 << state);
 
 	u32 lostCount;
 	u32 retransCount;
@@ -154,6 +229,49 @@ static int setTCPState(ProcessSessionKey *key, struct tcp_sock *ts, u16 state) {
 		__sync_fetch_and_add(&tcpValue->lostCount, lostCount);
 	if (retransCount > 0)
 		__sync_fetch_and_add(&tcpValue->retransCount, retransCount);
+
+	return BPF_RET_OK;
+}
+
+__attribute__((always_inline))
+static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid, u8 bind) {
+
+	SessionInfo dummy;
+	__builtin_memset(&dummy, 0, sizeof(SessionInfo));
+	bpf_map_update_elem(&sessionInfoMap, key, &dummy, BPF_NOEXIST);
+
+
+	SessionInfo *sInfo = bpf_map_lookup_elem(&sessionInfoMap, key);
+	if (sInfo == NULL) {
+		return BPF_RET_ERROR;
+	}
+
+	if (sInfo->bindState != BIND) {
+		if (bind != BIND) {
+			return BPF_RET_ERROR;
+		}
+		sInfo->bindState = bind;
+	}
+
+	sInfo->state |= (1 << state);
+
+	int i = 0;
+	int check = 0;
+	for (; i < MAX_PID_LIST; i++) {
+		if (sInfo->pid[i] == pid) {
+			check = 1;
+			break;
+		}
+		if (sInfo->pid[i] == 0) {
+			check = 1;
+			sInfo->pid[i] = pid;
+			break;
+		}
+	}
+
+	if (check == 0) {
+		return BPF_RET_ERROR;
+	}
 
 	return BPF_RET_OK;
 }
@@ -175,12 +293,18 @@ int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
 	}
 
 	// TODO : CHECK
-	BindCheckValue bindValue;
-	bindValue.bindState = BIND;
+	//BindCheckValue bindValue;
+	//bindValue.bindState = BIND;
 
-	bpf_map_update_elem(&bindCheckMap, &key.fourTuple, &bindValue, BPF_ANY);
+	//bpf_map_update_elem(&bindCheckMap, &key.fourTuple, &bindValue, BPF_ANY);
+	
 
-	bpf_printk("inet_csk_accept(ret) - %d\n", key.pid);
+	int ret = setSessionInfo(&key.fourTuple, TCP_ESTABLISHED, key.pid, BIND);
+	if (ret != BPF_RET_OK) {
+		return ret;
+	}
+
+	bpf_printk("inet_csk_accept(ret), %d ", key.fourTuple.sport);
 	return BPF_RET_OK;
 }
 
@@ -218,6 +342,12 @@ int kretprobe__tcp_connect(struct pt_regs *ctx) {
 		return BPF_RET_ERROR;
 	}
 
+	u8 state = TCP_SYN_SENT;
+	ret = setSessionInfo(&key.fourTuple, state, key.pid, BIND);
+	if (ret != BPF_RET_OK) {
+		return ret;
+	}
+
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
 	if (ts == NULL) {
 		return BPF_RET_ERROR;
@@ -227,9 +357,8 @@ int kretprobe__tcp_connect(struct pt_regs *ctx) {
 		return BPF_RET_ERROR;
 	}
 
-	u8 state = TCP_SYN_SENT;
 
-	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
+	if (setTCPState(&key, ts) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
 
@@ -253,8 +382,13 @@ int kprobe__tcp_finish_connect(struct pt_regs* ctx) {
 	}
 
 	u8 state = TCP_ESTABLISHED;
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	if (ret != BPF_RET_OK) {
+		return ret;
+	}
+
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
-	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
+	if (setTCPState(&key, ts) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
 
@@ -285,8 +419,13 @@ int kprobe__tcp_set_state(struct pt_regs* ctx) {
 		return BPF_RET_ERROR;
 	}
 
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	if (ret != BPF_RET_OK) {
+		return ret;
+	}
+
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
-	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
+	if (setTCPState(&key, ts) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
 
@@ -332,11 +471,20 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	int ipv;
 	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
 	if ((ipv = setProcessSessionKey(&key, sk)) == BPF_RET_ERROR) {
+		bpf_printk("fail set pKey\n");
 		return BPF_RET_ERROR;
+	}
+
+	u8 state = TCP_ESTABLISHED;
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	if (ret != BPF_RET_OK) {
+		//bpf_printk("fail set sInfo %d, \n", key.fourTuple.sport);
+		return ret;
 	}
 
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
 	if (ts == NULL) {
+		bpf_printk("fail ts\n");
 		return BPF_RET_ERROR;
 	}
 	u32 sendCount;
@@ -347,20 +495,17 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 		return BPF_RET_ERROR;
 	}
 
-	int ret;
 	if ((ret = setSessionState(&key, ipv, IPPROTO_TCP, UNKNOWN, sendByte, sendCount, recvByte, recvCount)) != BPF_RET_OK) {
+		//bpf_printk("fail set Session Sate\n");
 		return BPF_RET_ERROR;
 	}
 
-	u8 state = 0;
-	if (ret == BPF_RET_OK) {
-		state = TCP_ESTABLISHED;
-	}	
-
-	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
+	if (setTCPState(&key, ts) == BPF_RET_ERROR) {
+		bpf_printk("fail set Tcp State\n");
 		return BPF_RET_ERROR;
 	}
-	bpf_printk("tcp_sendmsg(ret) - %d\n", key.pid);
+
+	bpf_printk("tcp_sendmsg(ret) - %d\n");
 	return BPF_RET_OK;
 }
 
@@ -378,6 +523,7 @@ int kprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 
 SEC("kretprobe/tcp_cleanup_rbuf")
 int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
+	//bpf_printk("tcp_cleanup_rbuf(ret) start\n");
 	u64 pid = bpf_get_current_pid_tgid();
 	struct sock **skpp;
 	skpp = bpf_map_lookup_elem(&sendSock, &pid);
@@ -404,6 +550,12 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 		return BPF_RET_ERROR;
 	}
 
+	u8 state = TCP_ESTABLISHED;
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	if (ret != BPF_RET_OK) {
+		return ret;
+	}
+
 	struct tcp_sock *ts = (struct tcp_sock*)sk;
 	if (ts == NULL) {
 		return BPF_RET_ERROR;
@@ -417,19 +569,14 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 		return BPF_RET_ERROR;
 	}
 
-	int ret;
 	if ((ret = setSessionState(&key, ipv, IPPROTO_TCP, UNKNOWN, sendByte, sendCount, recvByte, recvCount)) != BPF_RET_OK) {
 		return BPF_RET_ERROR;
 	}
 
-	u8 state = 0;
-	if (ret == BPF_RET_OK) {
-		state = TCP_ESTABLISHED;
-	}
-
-	if (setTCPState(&key, ts, state) == BPF_RET_ERROR) {
+	if (setTCPState(&key, ts) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
+
 	bpf_printk("tcp_cleanup_rbuf(ret) - %d\n", key.pid);
 	return BPF_RET_OK;
 }
@@ -453,30 +600,15 @@ int kprobe__tcp_close(struct pt_regs *ctx) {
 	if ((ipv = setProcessSessionKey(&key, sk)) == BPF_RET_ERROR) {
 		return BPF_RET_ERROR;
 	}
-
-	CloseStateValue closeValue;
-	__builtin_memset(&closeValue, 0, sizeof(CloseStateValue));
-
-	SessionStateValue *sValue = bpf_map_lookup_elem(&sessionStateMap, &key);
-	if (sValue == NULL) {
-		return BPF_RET_ERROR;
-	}
-	//__builtin_memcpy(&closeValue.sessionState, sValue, sizeof(closeValue.sessionState));
-	//bpf_map_delete_elem(&sessionStateMap, &key);
-
-	TCPStateValue *tcpValue = bpf_map_lookup_elem(&tcpStateMap, &key);
-	if (tcpValue == NULL) {
-		return BPF_RET_ERROR;
-	}
-	tcpValue->state |= (1 << TCP_CLOSE);
-	//__builtin_memcpy(&closeValue.tcpState, tcpValue, sizeof(closeValue.tcpState));
-	//bpf_map_delete_elem(&tcpStateMap, &key);
-
-	//bpf_map_update_elem(&closeStateMap, &key, &closeValue, BPF_ANY);
+	//bpf_map_delete_elem(&bindCheckMap, &key.fourTuple);
+	
+	closeSessionFunc(sk);
+	bpf_printk("tcp_close\n");
 
 	return BPF_RET_OK;
 }
 
+/*
 SEC("kprobe/inet_csk_listen_stop")
 int kprobe__inet_csk_listen_stop(struct pt_regs *ctx) {
 	const char fmt_str[] = "inet_csk_listen_stop\n";
@@ -520,7 +652,7 @@ int kprobe__inet_csk_listen_stop(struct pt_regs *ctx) {
 	return 0;
 
 }
-
+*/
 
 #if 0
 SEC("kprobe/tcp_sendpage")
@@ -551,6 +683,7 @@ int kprobe__tcp__recvmsg(struct pt_regs *ctx) {
 
 
 
+#if 0
 
 ///
 // UDP
@@ -752,8 +885,4 @@ int kretprobe__skb_consume_udp(struct pt_regs *ctx) {
 }
 
 
-
-
-
-
-
+#endif

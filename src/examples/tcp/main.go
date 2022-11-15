@@ -27,6 +27,17 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+type resourceKey struct {
+	ip           string
+	resourceType string
+	port         int32
+}
+
+type resourceInfo struct {
+	namespace    string
+	resourceName string
+}
+
 type stateData struct {
 	SessionState bpfSessionStateValue
 	TcpState     bpfTcpStateValue
@@ -126,7 +137,6 @@ func diffTcpState(totalState, oldState bpfTcpStateValue) bpfTcpStateValue {
 	}
 	diff.Latency = totalState.Latency
 	diff.Jitter = totalState.Jitter
-	diff.State = totalState.State
 
 	return diff
 }
@@ -137,30 +147,95 @@ func int2ip(nn uint32) net.IP {
 	return ip
 }
 
-func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[string]resourceInfo) error {
-	p.PutTag("SourcePort", fmt.Sprintf("%d", key.FourTuple.Sport))
-	p.PutTag("DestinationPort", fmt.Sprintf("%d", key.FourTuple.Dport))
+func setSourceInfo(p *pack.TagCountPack, ip, port, namespace, service, pod, container string) {
+	p.PutTag("SourceIP", ip)
+	p.PutTag("SourcePort", port)
+	p.PutTag("SourceNamespace", namespace)
+	p.PutTag("SourceServiceName", service)
+	p.PutTag("SourcePodName", pod)
+	p.PutTag("SourceContainerName", container)
+}
+
+func setDestinationInfo(p *pack.TagCountPack, ip, port, namespace, service, pod, container string) {
+	p.PutTag("DestinationIP", ip)
+	p.PutTag("DestinationPort", port)
+	p.PutTag("DestinationNamespace", namespace)
+	p.PutTag("DestinationServiceName", service)
+	p.PutTag("DestinationPodName", pod)
+	p.PutTag("DestinationContainerName", container)
+}
+
+func getResource(ip string, port int32, resourceMap map[resourceKey]resourceInfo) (namespace, service, pod, container string) {
+	key := resourceKey{}
+	key.ip = ip
+	key.resourceType = "Pod"
+	key.port = port
+
+	if v, ok := resourceMap[key]; ok {
+		namespace = v.namespace
+		pod = v.resourceName
+		service = "Unknown"
+
+		key.resourceType = "Container"
+
+		if v, ok := resourceMap[key]; ok {
+			container = v.resourceName
+		} else {
+			container = "Unknown"
+		}
+	} else {
+		container = "Unknown"
+		key.port = 0
+
+		if v, ok := resourceMap[key]; ok {
+			namespace = v.namespace
+			pod = v.resourceName
+			service = "Unknown"
+		} else {
+			pod = "Unknown"
+
+			key.resourceType = "Conatainer"
+
+			if v, ok := resourceMap[key]; ok {
+				namespace = v.namespace
+				service = v.resourceName
+			} else {
+				namespace = "Unknown"
+				service = "Unknown"
+			}
+		}
+
+	}
+	return
+}
+
+func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[resourceKey]resourceInfo) error {
+	var ip string
+	var port string
+	var namespace string
+	var service string
+	var pod string
+	var container string
+
 	if key.FourTuple.Ipv == 4 {
-		sourceIP := int2ip(key.FourTuple.Saddr).String()
-		if resourceInfo, ok := resourceMap[sourceIP]; ok {
-			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
-			p.PutTag("SourceType", resourceInfo.resourceType)
-			p.PutTag("SourceName", resourceInfo.resourceName)
-		} else {
-			p.PutTag("SourceType", "Unknown")
-			p.PutTag("SourceName", "Unknown")
-		}
-		p.PutTag("SourceIp", sourceIP)
-		destinationIP := int2ip(key.FourTuple.Daddr).String()
-		if resourceInfo, ok := resourceMap[destinationIP]; ok {
-			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
-			p.PutTag("DestinationType", resourceInfo.resourceType)
-			p.PutTag("DestinationName", resourceInfo.resourceName)
-		} else {
-			p.PutTag("DestinationType", "Unknown")
-			p.PutTag("DestinationName", "Unknown")
-		}
-		p.PutTag("DestinationIp", destinationIP)
+
+		//source info
+		ip = int2ip(key.FourTuple.Saddr).String()
+		port = fmt.Sprintf("%d", key.FourTuple.Sport)
+
+		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Sport), resourceMap)
+
+		setSourceInfo(p, ip, port, namespace, service, pod, container)
+
+		//destination info
+		ip = int2ip(key.FourTuple.Daddr).String()
+		port = fmt.Sprintf("%d", key.FourTuple.Dport)
+
+		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Sport), resourceMap)
+
+		setDestinationInfo(p, ip, port, namespace, service, pod, container)
+
+		// container는 port 항상 지정되어야함
 	} else if key.FourTuple.Ipv == 6 {
 		fmt.Println(key)
 		// TODO
@@ -170,31 +245,33 @@ func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap 
 	return nil
 }
 
-// ServerType
-func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[string]resourceInfo) error {
-	p.PutTag("SourcePort", fmt.Sprintf("%d", key.FourTuple.Dport))
-	p.PutTag("DestinationPort", fmt.Sprintf("%d", key.FourTuple.Sport))
+// ServerType ip/port Revserse
+func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[resourceKey]resourceInfo) error {
 	if key.FourTuple.Ipv == 4 {
-		sourceIP := int2ip(key.FourTuple.Saddr).String()
-		if resourceInfo, ok := resourceMap[sourceIP]; ok {
-			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
-			p.PutTag("DestinationType", resourceInfo.resourceType)
-			p.PutTag("DestinationName", resourceInfo.resourceName)
-		} else {
-			p.PutTag("DestinationType", "Unknown")
-			p.PutTag("DestinationName", "Unknown")
-		}
-		p.PutTag("DestinationIp", sourceIP)
-		destinationIP := int2ip(key.FourTuple.Daddr).String()
-		if resourceInfo, ok := resourceMap[destinationIP]; ok {
-			fmt.Println(resourceInfo.resourceType, " : ", resourceInfo.resourceName, "!!!!!!!")
-			p.PutTag("SourceType", resourceInfo.resourceType)
-			p.PutTag("SourceName", resourceInfo.resourceName)
-		} else {
-			p.PutTag("SourceType", "Unknown")
-			p.PutTag("SourceName", "Unknown")
-		}
-		p.PutTag("SourceIp", destinationIP)
+
+		var ip string
+		var port string
+		var namespace string
+		var service string
+		var pod string
+		var container string
+
+		//source info
+		ip = int2ip(key.FourTuple.Daddr).String()
+		port = fmt.Sprintf("%d", key.FourTuple.Dport)
+
+		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Sport), resourceMap)
+
+		setSourceInfo(p, ip, port, namespace, service, pod, container)
+
+		//destination info
+		ip = int2ip(key.FourTuple.Saddr).String()
+		port = fmt.Sprintf("%d", key.FourTuple.Sport)
+
+		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Sport), resourceMap)
+
+		setDestinationInfo(p, ip, port, namespace, service, pod, container)
+
 	} else {
 		// TODO
 		return errors.New("TODO")
@@ -202,9 +279,10 @@ func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap m
 	p.PutTag("Pid", fmt.Sprintf("%d", key.Pid))
 	return nil
 }
-func sendSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionStateValue, onewayClient *oneway.OneWayTcpClient, resourceMap map[string]resourceInfo) error {
+
+func sendTcpSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionStateValue, tcpState *bpfTcpStateValue, onewayClient *oneway.OneWayTcpClient, resourceMap map[resourceKey]resourceInfo) error {
 	sessionPack := pack.NewTagCountPack()
-	sessionPack.Category = "sessionState"
+	sessionPack.Category = "tcpSessionState"
 	sessionPack.Time = time.Now().UnixNano() / int64(time.Millisecond)
 	sessionPack.SetPCODE(pcode)
 
@@ -236,6 +314,11 @@ func sendSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionStateVal
 		sessionPack.Put("RecvByte", sessionState.RecvByte)
 	}
 
+	//	tcpPack.Put("RetransCount", tcpState.RetransCount)
+	//	tcpPack.Put("LostCount", tcpState.LostCount)
+	sessionPack.Put("Latency", tcpState.Latency)
+	sessionPack.Put("Jitter", tcpState.Jitter)
+
 	fmt.Println(sessionPack)
 	err := onewayClient.Send(sessionPack)
 	if err != nil {
@@ -245,68 +328,30 @@ func sendSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionStateVal
 	return nil
 }
 
-func sendTcpPack(key *bpfProcessSessionKey, tcpState *bpfTcpStateValue, onewayClient *oneway.OneWayTcpClient, resourceMap map[string]resourceInfo, directions uint8) error {
-	tcpPack := pack.NewTagCountPack()
-	tcpPack.Category = "tcpState"
-	tcpPack.Time = time.Now().UnixNano() / int64(time.Millisecond)
-	tcpPack.SetPCODE(pcode)
-
-	if directions == 1 {
-		err := setPackTagIn(tcpPack, key, resourceMap)
-		if err != nil {
-			return err
-		}
+func getStateData(key bpfProcessSessionKey, sData *stateData, sessionState bpfSessionStateValue, tcpState bpfTcpStateValue) {
+	if oldDataMap[key] == nil {
+		sData.SessionState = sessionState
+		sData.TcpState = tcpState
+		oldDataMap[key] = sData
 	} else {
-		err := setPackTagOut(tcpPack, key, resourceMap)
-		if err != nil {
-			return err
+		//Session State 변화가 없으면 Tcp State도 의미없음
+		if !cmp.Equal(oldDataMap[key].SessionState, sessionState) {
+
+			sData.SessionState = diffSessionState(sessionState, oldDataMap[key].SessionState)
+			sData.TcpState = diffTcpState(tcpState, oldDataMap[key].TcpState)
+
+			oldDataMap[key].SessionState = sessionState
+			oldDataMap[key].TcpState = tcpState
 		}
 	}
 
-	//	tcpPack.Put("RetransCount", tcpState.RetransCount)
-	//	tcpPack.Put("LostCount", tcpState.LostCount)
-	tcpPack.Put("Latency", tcpState.Latency)
-	tcpPack.Put("Jitter", tcpState.Jitter)
-	//tcpPack.Put("")
-
-	fmt.Println(tcpPack)
-	err := onewayClient.Send(tcpPack)
-	if err != nil {
-		return err
-	}
-	return nil
 }
-
-// 4Tuple 기준으로 Close 된 모든 항목을 삭제해야함
-// TODO 매번 모든 Key값을 검토해야하기 떄문에 성능상 문제가 있을수 있음, 개선 필요
-// TODO2 일반적인 상황이 아니라 close 등의 이벤트를 받지 못하면 Delete 가 영원히 지속됨
-func deleteDataWithFourTuple(keys []*bpfProcessSessionKey, objs bpfObjects) {
-	var mKey bpfProcessSessionKey
-	var sessionState bpfSessionStateValue
-
-	for _, dKey := range keys {
-		iter := objs.SessionStateMap.Iterate()
-		for {
-			ret := iter.Next(&mKey, &sessionState)
-			if !ret {
-				break
-			}
-
-			if cmp.Equal(mKey.FourTuple, dKey.FourTuple) {
-				objs.SessionStateMap.Delete(mKey)
-				objs.TcpStateMap.Delete(mKey)
-			}
-		}
-	}
-}
-
-func getIntervalData(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, resourceMap map[string]resourceInfo) {
+func getIntervalData(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, resourceMap map[resourceKey]resourceInfo) {
 	var key bpfProcessSessionKey
 	var sessionState bpfSessionStateValue
 	var tcpState bpfTcpStateValue
-	//var closeState bpfCloseStateValue
+	var closeState bpfCloseStateValue
 
-	deleteTuple := make([]*bpfProcessSessionKey, 0)
 	iter := objs.SessionStateMap.Iterate()
 	for {
 		sData := &stateData{}
@@ -316,43 +361,68 @@ func getIntervalData(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, reso
 		}
 		objs.TcpStateMap.Lookup(key, &tcpState)
 
-		if tcpState.State&(1<<TCP_CLOSE) > 0 {
-			deleteTuple = append(deleteTuple, &key)
-			//objs.SessionStateMap.Delete(key)
-			//objs.TcpStateMap.Delete(key)
-		}
+		// Close 이후 동일 키값으로 세션 발생 케이스
+		err := objs.CloseStateMap.Lookup(key, &closeState)
+		if err != nil && (closeState.SessionState.SendCount > 0 || closeState.SessionState.RecvCount > 0) {
+			sData := &stateData{}
+			getStateData(key, sData, closeState.SessionState, closeState.TcpState)
+			delete(oldDataMap, key)
 
-		if oldDataMap[key] == nil {
-			sData.SessionState = sessionState
-			sData.TcpState = tcpState
-			oldDataMap[key] = sData
-		} else {
-			//Session State 변화가 없으면 Tcp State도 의미없음
-			if cmp.Equal(oldDataMap[key].SessionState, sessionState) {
-				continue
+			if sData.SessionState.SendCount > 0 || sData.SessionState.RecvCount > 0 {
+				err := sendTcpSessionPack(&key, &sData.SessionState, &sData.TcpState, onewayClient, resourceMap)
+				if err != nil {
+					fmt.Println(err)
+				}
 			}
 
-			sData.SessionState = diffSessionState(sessionState, oldDataMap[key].SessionState)
-			sData.TcpState = diffTcpState(tcpState, oldDataMap[key].TcpState)
-
-			oldDataMap[key].SessionState = sessionState
-			oldDataMap[key].TcpState = tcpState
+			objs.CloseStateMap.Delete(key)
 		}
+
+		// 현재 세션에 대한 케이스
+		getStateData(key, sData, sessionState, tcpState)
 
 		if sData.SessionState.SendCount > 0 || sData.SessionState.RecvCount > 0 {
-
-			err := sendSessionPack(&key, &sData.SessionState, onewayClient, resourceMap)
-			if err != nil {
-				fmt.Println(err)
-			}
-			err = sendTcpPack(&key, &sData.TcpState, onewayClient, resourceMap, sData.SessionState.Direction)
+			err := sendTcpSessionPack(&key, &sData.SessionState, &sData.TcpState, onewayClient, resourceMap)
 			if err != nil {
 				fmt.Println(err)
 			}
 		}
 	}
 
-	deleteDataWithFourTuple(deleteTuple, objs)
+	// TODO 별도 루틴으로 뺴야할지 검토 필요
+	// Close이후 동일 세션 미발생 케이스
+	iter = objs.CloseStateMap.Iterate()
+	for {
+
+		sData := &stateData{}
+		ret := iter.Next(&key, &closeState)
+		if !ret {
+			break
+		}
+
+		getStateData(key, sData, closeState.SessionState, closeState.TcpState)
+		delete(oldDataMap, key)
+
+		if oldDataMap[key] == nil {
+			sData.SessionState = closeState.SessionState
+			sData.TcpState = closeState.TcpState
+		} else {
+			if !cmp.Equal(oldDataMap[key].SessionState, sessionState) {
+				sData.SessionState = diffSessionState(closeState.SessionState, oldDataMap[key].SessionState)
+				sData.TcpState = diffTcpState(closeState.TcpState, oldDataMap[key].TcpState)
+			}
+			delete(oldDataMap, key)
+		}
+
+		if sData.SessionState.SendCount > 0 || sData.SessionState.RecvCount > 0 {
+			err := sendTcpSessionPack(&key, &sData.SessionState, &sData.TcpState, onewayClient, resourceMap)
+			if err != nil {
+				fmt.Println(err)
+			}
+		}
+		objs.CloseStateMap.Delete(key)
+	}
+
 }
 
 func checkTime(interval int, objs bpfObjects, onewayClient *oneway.OneWayTcpClient) {
@@ -385,19 +455,13 @@ func Parse(lic string) (int64, []byte) {
 	return pcode, security_key
 }
 
-type resourceInfo struct {
-	resourceType string
-	resourceName string
-}
-
-func getKuberResourceMap() map[string]resourceInfo {
-	var resourceMap map[string]resourceInfo
-	resourceMap = make(map[string]resourceInfo)
+func getKuberResourceMap() map[resourceKey]resourceInfo {
+	resourceMap := make(map[resourceKey]resourceInfo)
 
 	//k8s
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		fmt.Println(err)
+		//fmt.Println(err)
 		return nil
 	}
 
@@ -413,25 +477,71 @@ func getKuberResourceMap() map[string]resourceInfo {
 		return nil
 	}
 
-	for i := 0; i < len(nslist.Items); i++ {
-		fmt.Println("===========================================")
-		fmt.Println("name space : ", nslist.Items[i].ObjectMeta.Name)
-		podlist, err := cliSet.CoreV1().Pods(nslist.Items[i].ObjectMeta.Name).List(context.TODO(), v1.ListOptions{})
+	for nsIdx := 0; nsIdx < len(nslist.Items); nsIdx++ {
+		nsName := nslist.Items[nsIdx].ObjectMeta.Name
+		serviceList, err := cliSet.CoreV1().Services(nsName).List(context.TODO(), v1.ListOptions{})
 		if err != nil {
 			fmt.Println(err)
 			return nil
 		}
 
-		for i := 0; i < len(podlist.Items); i++ {
-			fmt.Println("-----------------------------")
-			fmt.Printf("Pod Name[%d] : %s\n", i, podlist.Items[i].ObjectMeta.Name)
-			fmt.Printf("Pod IP[%d] : %s\n", i, podlist.Items[i].Status.PodIP)
+		for serviceIdx := 0; serviceIdx < len(serviceList.Items); serviceIdx++ {
+			key := resourceKey{}
+			key.ip = serviceList.Items[serviceIdx].Spec.ClusterIP
+			key.resourceType = "Service"
+			key.port = 0
 
-			resouce := resourceInfo{"POD", podlist.Items[i].ObjectMeta.Name}
+			info := resourceInfo{}
+			info.namespace = nsName
+			info.resourceName = serviceList.Items[serviceIdx].ObjectMeta.Name
 
-			resourceMap[podlist.Items[i].Status.PodIP] = resouce
-			//.resourceType = "POD"
-			//resourceMap[podlist.Items[i].Status.PodIP].resourceName = podlist.Items[i].ObjectMeta.Name
+			resourceMap[key] = info
+		}
+
+		podList, err := cliSet.CoreV1().Pods(nsName).List(context.TODO(), v1.ListOptions{})
+		if err != nil {
+			fmt.Println(err)
+			return nil
+		}
+
+		for podIdx := 0; podIdx < len(podList.Items); podIdx++ {
+			pKey := resourceKey{}
+			pKey.ip = podList.Items[podIdx].Status.PodIP
+			pKey.resourceType = "Pod"
+			pKey.port = 0
+
+			podInfo := resourceInfo{}
+			podInfo.namespace = nsName
+			podInfo.resourceName = podList.Items[podIdx].ObjectMeta.Name
+
+			resourceMap[pKey] = podInfo
+
+			containers := podList.Items[podIdx].Spec.Containers
+
+			for containerIdx := 0; containerIdx < len(containers); containerIdx++ {
+				cKey := resourceKey{}
+				cKey.ip = pKey.ip
+				cKey.resourceType = "Container"
+
+				cInfo := resourceInfo{}
+				cInfo.namespace = nsName
+				cInfo.resourceName = containers[containerIdx].Name
+				ports := containers[containerIdx].Ports
+				if len(ports) == 0 {
+					continue
+				}
+
+				// Pod, Container 동시 갱신
+				// 동일 IP 포트 발생 가능 CASE 확인되어 Port 까지 확인하는 케이스 추가
+				for portIdx := 0; portIdx < len(ports); portIdx++ {
+					cKey.port = ports[portIdx].ContainerPort
+					pKey.port = cKey.port
+
+					resourceMap[pKey] = podInfo
+					resourceMap[cKey] = cInfo
+				}
+			}
+
 		}
 	}
 	return resourceMap
@@ -495,17 +605,19 @@ func main() {
 	defer objs.Close()
 
 	var kprobeMap = map[string]*ebpf.Program{
-		"tcp_connect":          objs.KprobeTcpConnect,
-		"tcp_set_state":        objs.KprobeTcpSetState,
-		"tcp_sendmsg":          objs.KprobeTcpSendmsg,
-		"tcp_cleanup_rbuf":     objs.KprobeTcpCleanupRbpf,
-		"tcp_close":            objs.KprobeTcpClose,
-		"inet_csk_listen_stop": objs.KprobeInetCskListenStop,
-		"tcp_finish_connect":   objs.KprobeTcpFinishConnect,
-		"inet_bind":            objs.KprobeInetBind,
-		"ip_make_skb":          objs.KprobeIpMakeSkb,
-		"udp_recvmsg":          objs.KprobeUdpRecvmsg,
-		"skb_consume_udp":      objs.KprobeSkbConsumeUdp,
+		"tcp_connect":      objs.KprobeTcpConnect,
+		"tcp_set_state":    objs.KprobeTcpSetState,
+		"tcp_sendmsg":      objs.KprobeTcpSendmsg,
+		"tcp_cleanup_rbuf": objs.KprobeTcpCleanupRbpf,
+		"tcp_close":        objs.KprobeTcpClose,
+		//"inet_csk_listen_stop": objs.KprobeInetCskListenStop,
+		"tcp_finish_connect": objs.KprobeTcpFinishConnect,
+		/*
+			"inet_bind":            objs.KprobeInetBind,
+			"ip_make_skb":          objs.KprobeIpMakeSkb,
+			"udp_recvmsg":          objs.KprobeUdpRecvmsg,
+			"skb_consume_udp":      objs.KprobeSkbConsumeUdp,
+		*/
 	}
 
 	var kretprobeMap = map[string]*ebpf.Program{
@@ -514,9 +626,11 @@ func main() {
 		"tcp_sendmsg":      objs.KretprobeTcpSendmsg,
 		"tcp_cleanup_rbuf": objs.KretprobeTcpCleanupRbpf,
 		//"inet_bind":        objs.KretprobeInetBind,
-		"ip_make_skb":     objs.KretprobeIpMakeSkb,
-		"udp_recvmsg":     objs.KretprobeUdpRecvmsg,
-		"skb_consume_udp": objs.KretprobeSkbConsumeUdp,
+		/*
+			"ip_make_skb":     objs.KretprobeIpMakeSkb,
+			"udp_recvmsg":     objs.KretprobeUdpRecvmsg,
+			"skb_consume_udp": objs.KretprobeSkbConsumeUdp,
+		*/
 	}
 
 	linkSlice := make([]link.Link, 0)
