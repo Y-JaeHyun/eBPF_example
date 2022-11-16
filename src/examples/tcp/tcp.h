@@ -25,8 +25,15 @@ typedef struct fourTupleKey {
 	u8 ipv;
 }FourTupleKey;
 
-#define NOT_BIND 0
+#define NOCHECK_BIND 0
 #define BIND 1
+#define NOT_BIND 2
+
+#define NOCHECK_START_SESSION 0
+#define START_SESSION 1
+#define NOT_START_SESSION 2
+
+
 typedef struct bindCheckValue {
 	u8 bindState;
 }BindCheckValue;
@@ -51,6 +58,7 @@ typedef struct sessionInfo {
 	u16 state;
 	u32 pid[MAX_PID_LIST];
 	u8 bindState;
+	u8 startSession;
 }SessionInfo;
 
 typedef struct sessionStateValue {

@@ -231,7 +231,7 @@ func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap 
 		ip = int2ip(key.FourTuple.Daddr).String()
 		port = fmt.Sprintf("%d", key.FourTuple.Dport)
 
-		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Sport), resourceMap)
+		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Dport), resourceMap)
 
 		setDestinationInfo(p, ip, port, namespace, service, pod, container)
 
@@ -260,7 +260,7 @@ func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap m
 		ip = int2ip(key.FourTuple.Daddr).String()
 		port = fmt.Sprintf("%d", key.FourTuple.Dport)
 
-		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Sport), resourceMap)
+		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Dport), resourceMap)
 
 		setSourceInfo(p, ip, port, namespace, service, pod, container)
 

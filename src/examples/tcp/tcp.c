@@ -234,7 +234,7 @@ static int setTCPState(ProcessSessionKey *key, struct tcp_sock *ts) {
 }
 
 __attribute__((always_inline))
-static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid, u8 bind) {
+static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid, u8 bind, u8 start) {
 
 	SessionInfo dummy;
 	__builtin_memset(&dummy, 0, sizeof(SessionInfo));
@@ -246,10 +246,14 @@ static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid, u8 bind) {
 		return BPF_RET_ERROR;
 	}
 
-	if (sInfo->bindState != BIND) {
-		if (bind != BIND) {
+	if (sInfo->startSession != START_SESSION) {
+		if (start != START_SESSION) {
 			return BPF_RET_ERROR;
 		}
+		sInfo->startSession = start;
+	}
+
+	if (sInfo->bindState == NOCHECK_BIND) {
 		sInfo->bindState = bind;
 	}
 
@@ -299,7 +303,7 @@ int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
 	//bpf_map_update_elem(&bindCheckMap, &key.fourTuple, &bindValue, BPF_ANY);
 	
 
-	int ret = setSessionInfo(&key.fourTuple, TCP_ESTABLISHED, key.pid, BIND);
+	int ret = setSessionInfo(&key.fourTuple, TCP_ESTABLISHED, key.pid, BIND, START_SESSION);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -343,7 +347,7 @@ int kretprobe__tcp_connect(struct pt_regs *ctx) {
 	}
 
 	u8 state = TCP_SYN_SENT;
-	ret = setSessionInfo(&key.fourTuple, state, key.pid, BIND);
+	ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, START_SESSION);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -382,7 +386,7 @@ int kprobe__tcp_finish_connect(struct pt_regs* ctx) {
 	}
 
 	u8 state = TCP_ESTABLISHED;
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -419,7 +423,7 @@ int kprobe__tcp_set_state(struct pt_regs* ctx) {
 		return BPF_RET_ERROR;
 	}
 
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -476,7 +480,7 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	}
 
 	u8 state = TCP_ESTABLISHED;
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
 	if (ret != BPF_RET_OK) {
 		//bpf_printk("fail set sInfo %d, \n", key.fourTuple.sport);
 		return ret;
@@ -551,7 +555,7 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 	}
 
 	u8 state = TCP_ESTABLISHED;
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
