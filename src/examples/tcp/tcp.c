@@ -177,8 +177,12 @@ static int setSessionState(ProcessSessionKey *key,u16 ether, u8 protocol, u8 dir
 	sValue->ether = ether;
 	sValue->protocol = protocol;
 	if (protocol == IPPROTO_TCP) {
-		sValue->sendCount = sendCount;
-		sValue->recvCount = recvCount;
+		if (sValue->sendCount < sendCount) {
+			sValue->sendCount = sendCount;
+		}
+		if (sValue->recvCount < recvCount) {
+			sValue->recvCount = recvCount;
+		}
 	} else {
 		if (sendCount > 0)
 			__sync_fetch_and_add(&sValue->sendCount, sendCount);
@@ -495,7 +499,7 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	u32 recvCount;
 
 	getTCPPacketCount(ts, &sendCount, &recvCount);
-	if (sendCount == (u32)-1 || recvCount == (u32)-1) {
+	if ((sendCount <= (u32)0 && recvCount <= (u32)0) || sendCount == (u32)-1 || recvCount == (u32)-1) {
 		return BPF_RET_ERROR;
 	}
 
@@ -569,7 +573,7 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 	u32 recvCount;
 
 	getTCPPacketCount(ts, &sendCount, &recvCount);
-	if (sendCount == (u32)-1 || recvCount == (u32)-1) {
+	if ((sendCount <= (u32)0 && recvCount <= (u32)0) || sendCount == (u32)-1 || recvCount == (u32)-1) {
 		return BPF_RET_ERROR;
 	}
 
