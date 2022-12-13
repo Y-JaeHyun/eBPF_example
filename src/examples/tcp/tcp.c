@@ -26,9 +26,26 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(key_size, sizeof(__u64));
-	__uint(value_size, sizeof(UdpArgs));
+	__uint(value_size, sizeof(void *));
 	__uint(max_entries, 512);
-} makeSkb SEC(".maps");
+} recvSock SEC(".maps");
+
+
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(__u64));
+	__uint(value_size, sizeof(ProcessSessionKey));
+	__uint(max_entries, 512);
+} udpSendSock SEC(".maps");
+
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(__u64));
+	__uint(value_size, sizeof(ProcessSessionKey));
+	__uint(max_entries, 512);
+} udpRecvSock SEC(".maps");
 
 
 
@@ -44,24 +61,22 @@ static int setFourTupleKey(FourTupleKey *key, struct sock *sk) {
 		bpf_probe_read_kernel(&key->saddr, sizeof(key->saddr), &(sk->__sk_common.skc_rcv_saddr));
 		bpf_probe_read_kernel(&key->daddr, sizeof(key->daddr), &(sk->__sk_common.skc_daddr));
 		ret = ETH_P_IP;
-		key->ipv = 4;
+		key->ipv = ETH_P_IP;
  
 	} else if (family == AF_INET6){
 		bpf_probe_read_kernel(&key->saddrv6, sizeof(key->saddrv6), &(sk->__sk_common.skc_v6_rcv_saddr));
 		bpf_probe_read_kernel(&key->daddrv6, sizeof(key->daddrv6), &(sk->__sk_common.skc_v6_daddr));
 		ret = ETH_P_IPV6;
-		key->ipv = 6;
+		key->ipv = ETH_P_IPV6;
 	} else {
 		return BPF_RET_ERROR;
 	}
-
 
 	bpf_probe_read_kernel(&key->sport, sizeof(key->sport), &(sk->__sk_common.skc_num));
 	bpf_probe_read_kernel(&key->dport, sizeof(key->dport), &(sk->__sk_common.skc_dport));
 	key->dport = bpf_ntohs(key->dport);
 
 	return ret;
-
 }
 
 __attribute__((always_inline))
@@ -73,37 +88,66 @@ static int setProcessSessionKey(ProcessSessionKey *key, struct sock *sk) {
 	return ret;
 }
 
-
 __attribute__((always_inline))
-static int closeSessionFunc(struct sock *sk) {
-	ProcessSessionKey pKey = {0, };
-	int ret = setFourTupleKey(&pKey.fourTuple, sk);
-	if (ret != BPF_RET_OK) {
-		return ret;
+static int setUDPProcessSessionKey(ProcessSessionKey *key, UdpArgs *args, int ipv) {
+	u64 pid = bpf_get_current_pid_tgid();
+	int ret = 0;
+	key->pid = pid;
+
+	if (ipv == ETH_P_IP) {
+		bpf_probe_read_kernel(&key->fourTuple.saddr, sizeof(key->fourTuple.saddr), &(args->fl4->saddr));
+		bpf_probe_read_kernel(&key->fourTuple.daddr, sizeof(key->fourTuple.daddr), &(args->fl4->daddr));
+		bpf_probe_read_kernel(&key->fourTuple.sport, sizeof(key->fourTuple.sport), &(args->fl4->uli.ports.sport));
+		bpf_probe_read_kernel(&key->fourTuple.dport, sizeof(key->fourTuple.dport), &(args->fl4->uli.ports.dport));
+		ret = ETH_P_IP;
+		key->fourTuple.ipv = ETH_P_IP;
+
+		key->fourTuple.dport = bpf_ntohs(key->fourTuple.dport);
+	} else if (ipv == ETH_P_IPV6) {
+		bpf_printk("udpv6");
+		bpf_probe_read_kernel(&key->fourTuple.saddrv6, sizeof(key->fourTuple.saddrv6), &(args->fl6->saddr));
+		bpf_probe_read_kernel(&key->fourTuple.daddrv6, sizeof(key->fourTuple.daddrv6), &(args->fl6->daddr));
+		bpf_probe_read_kernel(&key->fourTuple.sport, sizeof(key->fourTuple.sport), &(args->fl6->uli.ports.sport));
+		bpf_probe_read_kernel(&key->fourTuple.dport, sizeof(key->fourTuple.dport), &(args->fl6->uli.ports.dport));
+		ret = ETH_P_IPV6;
+		key->fourTuple.ipv = ETH_P_IPV6;
+
+	} else {
+		return BPF_RET_ERROR;
 	}
 
-	SessionInfo *sInfo = bpf_map_lookup_elem(&sessionInfoMap, &pKey.fourTuple);
+	key->fourTuple.sport = bpf_ntohs(key->fourTuple.sport);
+	key->fourTuple.dport = bpf_ntohs(key->fourTuple.dport);
+
+	return ret;
+}
+
+
+__attribute__((always_inline))
+static int closeSessionFunc(ProcessSessionKey *pKey) {
+	bpf_printk("closeSessionFunc\n");
+	SessionInfo *sInfo = bpf_map_lookup_elem(&sessionInfoMap, &pKey->fourTuple);
 	if (sInfo == NULL) {
 		return BPF_RET_ERROR;
 	}
 
 	int i = 0;
 	for (i = 0; i < MAX_PID_LIST; i++) {
-
-		bpf_probe_read_kernel(&pKey.pid, sizeof(u32), &sInfo->pid[i]);
-		if (pKey.pid == 0) break;
+		bpf_probe_read_kernel(&pKey->pid, sizeof(u32), &sInfo->pid[i]);
+		bpf_printk("pid : %d\n", pKey->pid);
+		if (pKey->pid == 0) break;
 
 		CloseStateValue dummy;
 		__builtin_memset(&dummy, 0, sizeof(CloseStateValue));
-		bpf_map_update_elem(&closeStateMap, &pKey, &dummy, BPF_NOEXIST);
+		bpf_map_update_elem(&closeStateMap, pKey, &dummy, BPF_NOEXIST);
 
-		CloseStateValue *closeState = bpf_map_lookup_elem(&closeStateMap, &pKey);
+		CloseStateValue *closeState = bpf_map_lookup_elem(&closeStateMap, pKey);
 		if (closeState == NULL) {
 			continue;
 		}
 
 
-		SessionStateValue *sValue = bpf_map_lookup_elem(&sessionStateMap, &pKey);
+		SessionStateValue *sValue = bpf_map_lookup_elem(&sessionStateMap, pKey);
 		if (sValue == NULL) {
 			continue;
 		}
@@ -116,9 +160,9 @@ static int closeSessionFunc(struct sock *sk) {
 		closeState->sessionState.sendByte += sValue->sendByte;
 		closeState->sessionState.recvByte += sValue->recvByte;
 
-		bpf_map_delete_elem(&sessionStateMap, &pKey);
+		bpf_map_delete_elem(&sessionStateMap, pKey);
 
-		TCPStateValue *tcpValue = bpf_map_lookup_elem(&tcpStateMap, &pKey);
+		TCPStateValue *tcpValue = bpf_map_lookup_elem(&tcpStateMap, pKey);
 		if (tcpValue == NULL) {
 			continue;
 		}
@@ -132,10 +176,10 @@ static int closeSessionFunc(struct sock *sk) {
 			closeState->tcpState.jitter = tcpValue->jitter;
 		}
 
-		bpf_map_delete_elem(&tcpStateMap, &pKey);
+		bpf_map_delete_elem(&tcpStateMap, pKey);
 	}
 
-	bpf_map_delete_elem(&sessionInfoMap, &pKey.fourTuple);
+	bpf_map_delete_elem(&sessionInfoMap, &pKey->fourTuple);
 	return BPF_RET_OK;
 
 }
@@ -157,17 +201,19 @@ static int setSessionState(ProcessSessionKey *key,u16 ether, u8 protocol, u8 dir
 
 	if (sValue->direction == UNKNOWN) {
 		if (direction == UNKNOWN) {
-			SessionInfo *sessionInfo = bpf_map_lookup_elem(&sessionInfoMap, &key->fourTuple);
-			if (sessionInfo != NULL && sessionInfo->bindState == BIND) {
+			if (protocol == IPPROTO_UDP) {
+				bpf_printk("sport : %d", key->fourTuple.sport);
+			}
+			u16 *type = bpf_map_lookup_elem(&bindCheckMap, &key->fourTuple.sport);
+			if (type != NULL) {
 				sValue->direction = IN;
 			} else {
-				//TODO 변경 가능성 검토
-				//agent에서 처리 가능하다면 return 하지말고 데이터 채워야됨
-				if (protocol == IPPROTO_TCP) {
-					return BPF_RET_UNKNOWN;
-				} else if (protocol == IPPROTO_UDP) {
-					return BPF_RET_UNKNOWN;
-				}	
+				// bindCheckMap에 ebpf 실행전에 bind된 내용이 갱신 되어 있어야함. (외부 Agent에서 처리됨)
+				// 해당 부분도 옵션으로 제공
+				//TODO Agent 부분 개발 완료 후 주석 헤제
+				
+				sValue->direction = OUT; 
+				return BPF_RET_ERROR;
 			}
 		} else {
 			sValue->direction = direction;
@@ -238,7 +284,7 @@ static int setTCPState(ProcessSessionKey *key, struct tcp_sock *ts) {
 }
 
 __attribute__((always_inline))
-static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid, u8 bind, u8 start) {
+static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid) {
 
 	SessionInfo dummy;
 	__builtin_memset(&dummy, 0, sizeof(SessionInfo));
@@ -250,18 +296,9 @@ static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid, u8 bind, u8 sta
 		return BPF_RET_ERROR;
 	}
 
-	if (sInfo->startSession != START_SESSION) {
-		if (start != START_SESSION) {
-			return BPF_RET_ERROR;
-		}
-		sInfo->startSession = start;
+	if (state != NOT_USE) {
+		sInfo->state |= (1 << state);
 	}
-
-	if (sInfo->bindState == NOCHECK_BIND) {
-		sInfo->bindState = bind;
-	}
-
-	sInfo->state |= (1 << state);
 
 	int i = 0;
 	int check = 0;
@@ -285,6 +322,174 @@ static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid, u8 bind, u8 sta
 }
 
 ///
+//Common
+//TODO : raw_socket 추가 여부는 검토 필요
+//현재는 TCP/UDP에 대한 추적으로 제한
+
+
+//IP Layer
+SEC("kprobe/inet_bind")
+int kprobe__inet_bind(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("inet_bind - %d\n", pid);
+
+	struct socket *sock = (struct socket *)PT_REGS_PARM1(ctx);
+	struct sockaddr_in *addr = (struct sockaddr_in *)PT_REGS_PARM2(ctx);
+
+	if (sock == NULL || addr == NULL) return BPF_RET_ERROR;
+
+	u16 type = 0;
+	bpf_probe_read_kernel(&type, sizeof(type), &sock->type);
+	
+	// TCP는inet_csk_accept 에서 처리하도록 통일?
+	if ((type & (SOCK_STREAM|SOCK_DGRAM)) == 0) {
+		return BPF_RET_ERROR;
+	}
+
+	u16 sin_port = 0;
+	bpf_probe_read_kernel(&sin_port, sizeof(u16), &(addr->sin_port));
+	sin_port = bpf_ntohs(sin_port);
+	
+	if (sin_port == 0) {
+		return BPF_RET_ERROR;
+	}
+
+	bpf_printk("bind : %d\n", sin_port);
+
+	bpf_map_update_elem(&bindCheckMap, &sin_port, &type, BPF_NOEXIST);
+	
+	return BPF_RET_OK;
+}
+
+
+SEC("kprobe/inet6_bind")
+int kprobe__inet6_bind(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("inet6_bind - %d\n", pid);
+
+	struct socket *sock = (struct socket *)PT_REGS_PARM1(ctx);
+	struct sockaddr_in6 *addr = (struct sockaddr_in6 *)PT_REGS_PARM2(ctx);
+
+	if (sock == NULL || addr == NULL) return BPF_RET_ERROR;
+
+	u16 type = 0;
+	bpf_probe_read_kernel(&type, sizeof(type), &sock->type);
+	if ((type & (SOCK_STREAM|SOCK_DGRAM)) == 0) {
+		return BPF_RET_ERROR;
+	}
+
+	u16 sin_port = 0;
+	bpf_probe_read_kernel(&sin_port, sizeof(u16), &(addr->sin6_port));
+	sin_port = bpf_ntohs(sin_port);
+	
+	if (sin_port == 0) {
+		return BPF_RET_ERROR;
+	}
+
+	bpf_printk("bind6 : %d\n", sin_port);
+
+	bpf_map_update_elem(&bindCheckMap, &sin_port, &type, BPF_NOEXIST);
+	
+	return BPF_RET_OK;
+}
+
+SEC("kprobe/inet_release")
+int kprobe__inet_release(struct pt_regs *ctx) {
+	bpf_printk("inet_release");
+	return BPF_RET_OK;
+}
+
+SEC("kprobe/ip_make_skb")
+int kprobe__ip_make_skb(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("ip_make_skb - %d\n", pid);
+
+	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+	int len = PT_REGS_PARM5(ctx);
+	struct flowi4 *fl4 = (struct flowi4 *)PT_REGS_PARM2(ctx);
+
+	u16 proto = 0;
+	bpf_probe_read_kernel(&proto, sizeof(proto), &sk->sk_protocol);
+	u16 type = 0;
+	bpf_probe_read_kernel(&type, sizeof(type), &sk->sk_type);
+	proto = bpf_ntohs(proto);
+	type = bpf_ntohs(type);
+
+	if ((type & IPPROTO_UDP) == 0 && (proto & IPPROTO_UDP) == 0 ) {
+		bpf_printk("NOT UDP!\n");
+		return BPF_RET_ERROR;
+	}
+
+	UdpArgs udpArgs = {};
+	ProcessSessionKey key;
+	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
+
+	bpf_probe_read_kernel(&udpArgs.sk, sizeof(udpArgs.sk), &sk);
+	bpf_probe_read_kernel(&udpArgs.len, sizeof(udpArgs.len), &len);
+	bpf_probe_read_kernel(&udpArgs.fl4, sizeof(udpArgs.fl4), &fl4);
+	setUDPProcessSessionKey(&key, &udpArgs, ETH_P_IP);
+
+	bpf_map_update_elem(&udpSendSock, &pid, &key, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kprobe/ip6_make_skb")
+int kprobe__ip6_make_skb(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("ip6_make_skb - %d\n", pid);
+
+	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
+	int len = PT_REGS_PARM5(ctx);
+	struct flowi6 *fl6 = (struct flowi6 *)PT_REGS_PARM7(ctx);
+
+	u16 proto = 0;
+	bpf_probe_read_kernel(&proto, sizeof(proto), &sk->sk_protocol);
+	u16 type = 0;
+	bpf_probe_read_kernel(&type, sizeof(type), &sk->sk_type);
+	proto = bpf_ntohs(proto);
+	type = bpf_ntohs(type);
+
+	if ((type & IPPROTO_UDP) == 0 && (proto & IPPROTO_UDP) == 0 ) {
+		bpf_printk("NOT UDP!\n");
+		return BPF_RET_ERROR;
+	}
+
+	UdpArgs udpArgs = {};
+	ProcessSessionKey key;
+	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
+
+	bpf_probe_read_kernel(&udpArgs.sk, sizeof(udpArgs.sk), &sk);
+	bpf_probe_read_kernel(&udpArgs.len, sizeof(udpArgs.len), &len);
+	bpf_probe_read_kernel(&udpArgs.fl6, sizeof(udpArgs.fl6), &fl6);
+	setUDPProcessSessionKey(&key, &udpArgs, ETH_P_IPV6);
+
+	bpf_map_update_elem(&udpSendSock, &pid, &key, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kretprobe/ip6_make_skb")
+int kretprobe__ip6_make_skb(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("ip6_make_skb(ret) - %d\n", pid);
+	return 0;
+}
+
+SEC("kretprobe/ip_make_skb")
+int kretprobe__ip_make_skb(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("ip_make_skb(ret) - %d\n", pid);
+	return 0;
+}
+
+SEC("kprobe/inet6_release")
+int kprobe__inet6_release(struct pt_regs *ctx) {
+	bpf_printk("inet6_release");
+	return BPF_RET_OK;
+}
+
+///
 // TCP
 
 SEC("kretprobe/inet_csk_accept")
@@ -297,18 +502,17 @@ int kretprobe__inet_csk_accept(struct pt_regs* ctx) {
 	ProcessSessionKey key;
 	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
 	if (setProcessSessionKey(&key, sk) == BPF_RET_ERROR) {
+		bpf_printk("fail set session key");
 		return BPF_RET_ERROR;
 	}
 
-	// TODO : CHECK
-	//BindCheckValue bindValue;
-	//bindValue.bindState = BIND;
+	// BIND 없이 진행되는 케이스 존재
+	u16 type = SOCK_STREAM;
+	bpf_map_update_elem(&bindCheckMap, &key.fourTuple.sport, &type, BPF_NOEXIST);
 
-	//bpf_map_update_elem(&bindCheckMap, &key.fourTuple, &bindValue, BPF_ANY);
-	
-
-	int ret = setSessionInfo(&key.fourTuple, TCP_ESTABLISHED, key.pid, BIND, START_SESSION);
+	int ret = setSessionInfo(&key.fourTuple, TCP_ESTABLISHED, key.pid);
 	if (ret != BPF_RET_OK) {
+		bpf_printk("fail set session info");
 		return ret;
 	}
 
@@ -351,7 +555,7 @@ int kretprobe__tcp_connect(struct pt_regs *ctx) {
 	}
 
 	u8 state = TCP_SYN_SENT;
-	ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, START_SESSION);
+	ret = setSessionInfo(&key.fourTuple, state, key.pid);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -390,7 +594,7 @@ int kprobe__tcp_finish_connect(struct pt_regs* ctx) {
 	}
 
 	u8 state = TCP_ESTABLISHED;
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -427,7 +631,7 @@ int kprobe__tcp_set_state(struct pt_regs* ctx) {
 		return BPF_RET_ERROR;
 	}
 
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -460,17 +664,21 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	struct sock **skpp;
 	skpp = bpf_map_lookup_elem(&sendSock, &pid);
 	if (skpp == NULL) {
+		bpf_printk("skpp null");
 		return BPF_RET_ERROR;
 	}
 	bpf_map_delete_elem(&sendSock, &pid);
 
 	struct sock *sk = *skpp;
 	if (sk == NULL) {
+		bpf_printk("sk null");
 		return BPF_RET_ERROR;
 	}
 
 	int sendByte = PT_REGS_RC(ctx);
 	if (sendByte < 0) {
+
+		bpf_printk("send byte 0");
 		return BPF_RET_ERROR;
 	}
 	int recvByte = 0;
@@ -484,9 +692,9 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 	}
 
 	u8 state = TCP_ESTABLISHED;
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid);
 	if (ret != BPF_RET_OK) {
-		//bpf_printk("fail set sInfo %d, \n", key.fourTuple.sport);
+		bpf_printk("fail set sInfo %d, \n", key.fourTuple.sport);
 		return ret;
 	}
 
@@ -500,6 +708,8 @@ int kretprobe__tcp_sendmsg(struct pt_regs*ctx) {
 
 	getTCPPacketCount(ts, &sendCount, &recvCount);
 	if ((sendCount <= (u32)0 && recvCount <= (u32)0) || sendCount == (u32)-1 || recvCount == (u32)-1) {
+		
+		bpf_printk("1\n");
 		return BPF_RET_ERROR;
 	}
 
@@ -559,7 +769,7 @@ int kretprobe__tcp__cleanup_rbpf(struct pt_regs *ctx) {
 	}
 
 	u8 state = TCP_ESTABLISHED;
-	int ret = setSessionInfo(&key.fourTuple, state, key.pid, NOT_BIND, NOT_START_SESSION);
+	int ret = setSessionInfo(&key.fourTuple, state, key.pid);
 	if (ret != BPF_RET_OK) {
 		return ret;
 	}
@@ -610,13 +820,13 @@ int kprobe__tcp_close(struct pt_regs *ctx) {
 	}
 	//bpf_map_delete_elem(&bindCheckMap, &key.fourTuple);
 	
-	closeSessionFunc(sk);
+	bpf_printk("%d %d\n", key.fourTuple.sport, key.fourTuple.dport);
+	closeSessionFunc(&key);
 	bpf_printk("tcp_close\n");
 
 	return BPF_RET_OK;
 }
 
-/*
 SEC("kprobe/inet_csk_listen_stop")
 int kprobe__inet_csk_listen_stop(struct pt_regs *ctx) {
 	const char fmt_str[] = "inet_csk_listen_stop\n";
@@ -630,37 +840,15 @@ int kprobe__inet_csk_listen_stop(struct pt_regs *ctx) {
 		return BPF_RET_ERROR;
 	}
 
-	ProcessSessionKey key;
-	int ipv;
-	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
-	if ((ipv = setProcessSessionKey(&key, sk)) == BPF_RET_ERROR) {
-		return BPF_RET_ERROR;
-	}
+	u16 sport;
+	bpf_probe_read_kernel(&sport, sizeof(sport), &(sk->__sk_common.skc_num));
+	bpf_printk("%d!!\n", sport);
 
-	CloseStateValue closeValue;
-	__builtin_memset(&closeValue, 0, sizeof(CloseStateValue));
-
-	SessionStateValue *sValue = bpf_map_lookup_elem(&sessionStateMap, &key);
-	if (sValue == NULL) {
-		return BPF_RET_ERROR;
-	}
-	//__builtin_memcpy(&closeValue.sessionState, sValue, sizeof(closeValue.sessionState));
-	//bpf_map_delete_elem(&sessionStateMap, &key);
-
-	TCPStateValue *tcpValue = bpf_map_lookup_elem(&tcpStateMap, &key);
-	if (tcpValue == NULL) {
-		return BPF_RET_ERROR;
-	}
-	tcpValue->state |= (1 << TCP_CLOSE);
-	//__builtin_memcpy(&closeValue.tcpState, tcpValue, sizeof(closeValue.tcpState));
-	//bpf_map_delete_elem(&tcpStateMap, &key);
-
-	//bpf_map_update_elem(&closeStateMap, &key, &closeValue, BPF_ANY);
+	bpf_map_delete_elem(&bindCheckMap, &sport);
 
 	return 0;
 
 }
-*/
 
 #if 0
 SEC("kprobe/tcp_sendpage")
@@ -691,175 +879,124 @@ int kprobe__tcp__recvmsg(struct pt_regs *ctx) {
 
 
 
-#if 0
+#if 1
 
 ///
 // UDP
-SEC("kprobe/inet_bind")
-int kprobe__inet_bind(struct pt_regs *ctx) {
+SEC("kprobe/udpv6_sendmsg")
+int kprobe__udpv6_sendmsg(struct pt_regs *ctx) {
 	u64 pid = bpf_get_current_pid_tgid();
-	bpf_printk("inet_bind - %d\n", pid);
+	int len = PT_REGS_PARM3(ctx);
+	bpf_printk("udpv6_sendmsg - %d, len = %d\n", pid, len);
 
-	struct socket *sock = (struct socket *)PT_REGS_PARM1(ctx);
-	struct sockaddr *addr = (struct sockaddr *)PT_REGS_PARM2(ctx);
-
-	if (sock == NULL || addr == NULL) return BPF_RET_ERROR;
-
-	u16 type = 0;
-	bpf_probe_read_kernel(&type, sizeof(type), &sock->type);
-	if ((type & SOCK_DGRAM) == 0) {
-		return BPF_RET_ERROR;
-	}
-
-	u16 sin_port = 0;
-	bpf_probe_read_kernel(&sin_port, sizeof(u16), &(((struct sockaddr_in *)addr)->sin_port));
-
-
-	sin_port = bpf_ntohs(sin_port);
-	if (sin_port == 0) {
-		return BPF_RET_ERROR;
-	}
-	bpf_printk("bind : %d\n", sin_port);
-
-
-	BindCheckValue bindValue;
-	bindValue.bindState = BIND;
-	bpf_map_update_elem(&udpBindCheckMap, &sin_port, &bindValue, BPF_ANY);
-
-
+	//bpf_map_update_elem(&sendSock, &pid, &sk, BPF_ANY);
 	return 0;
 }
 
-/*
-SEC("kretprobe/inet_bind")
-int kretprobe__inet_bind(struct pt_regs *ctx) {
+SEC("kprobe/udp_sendmsg")
+int kprobe__udp_sendmsg(struct pt_regs *ctx) {
 	u64 pid = bpf_get_current_pid_tgid();
-	bpf_printk("inet_bind(ret) - %d\n", pid);
+	int len = PT_REGS_PARM3(ctx);
+	bpf_printk("udp_sendmsg - %d, len = %d\n", pid, len);
 
-	struct socket *sock = (struct socket *)PT_REGS_PARM1(ctx);
-	struct sockaddr *addr = (struct sockaddr *)PT_REGS_PARM2(ctx);
+	//bpf_map_update_elem(&sendSock, &pid, &sk, BPF_ANY);
+	return 0;
+}
 
-	if (sock == NULL || addr == NULL) return BPF_RET_ERROR;
+__attribute__((always_inline))
+static int udp_sendmsg_func(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
 
-	u16 type = 0;
-	bpf_probe_read_kernel(&type, sizeof(type), &sock->type);
-	if ((type & SOCK_DGRAM) == 0) {
+	ProcessSessionKey *key;
+	key = bpf_map_lookup_elem(&udpSendSock, &pid);
+	if (key == NULL) {
+		bpf_printk("key null");
 		return BPF_RET_ERROR;
 	}
 
-	u16 sin_port = 0;
-	bpf_probe_read_kernel(&sin_port, sizeof(u16), &(((struct sockaddr_in *)addr)->sin_port));
 
-
-	sin_port = bpf_ntohs(sin_port);
-	if (sin_port == 0) {
+	int sendByte = PT_REGS_RC(ctx);
+	if (sendByte < 0) {
+		bpf_printk("send byte 0");
 		return BPF_RET_ERROR;
 	}
-	bpf_printk("bind(ret) : %d\n", sin_port);
+	int recvByte = 0;
 
+	ProcessSessionKey pKey;
+	__builtin_memset(&pKey, 0, sizeof(ProcessSessionKey));
 
-	BindCheckValue bindValue;
-	bindValue.bindState = BIND;
-	bpf_map_update_elem(&udpBindCheckMap, &sin_port, &bindValue, BPF_ANY);
+	bpf_probe_read_kernel(&pKey, sizeof(pKey), key);
 
+	int ret = setSessionInfo(&pKey.fourTuple, NOT_USE, pKey.pid);
+	if (ret != BPF_RET_OK) {
+		bpf_printk("fail set sInfo %d, \n", pKey.fourTuple.sport);
+		return ret;
+	}
 
+	if ((ret = setSessionState(&pKey, pKey.fourTuple.ipv, IPPROTO_UDP, UNKNOWN, sendByte, 1, recvByte, 0)) != BPF_RET_OK) {
+		bpf_printk("fail set Session Sate\n");
+		return BPF_RET_ERROR;
+	}
 
+	bpf_printk("udp_sendmsg(ret)\n");
 	return BPF_RET_OK;
-}
-SEC("kprobe/__inet_bind")
-int kprobe__inet_bind(struct pt_regs *ctx) {
-	u64 pid = bpf_get_current_pid_tgid();
-	bpf_printk("__inet_bind - %d\n", pid);
-	return 0;
+
 }
 
-SEC("kretprobe/__inet_bind")
-int kretprobe__inet_bind(struct pt_regs *ctx) {
-	u64 pid = bpf_get_current_pid_tgid();
-	bpf_printk("__inet_bind(ret) - %d\n", pid);
-
-	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
-	
-	ProcessSessionKey key;
-	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
-	if (setProcessSessionKey(&key, sk, AF_INET) == BPF_RET_ERROR) {
-		return BPF_RET_ERROR;
-	}
-
-	bpf_printk("key - %d %d \n", key.fourTuple.sport, key.fourTuple.dport);
-
-	return 0;
-}
-*/
-
-SEC("kprobe/ip_make_skb")
-int kprobe__ip_make_skb(struct pt_regs *ctx) {
-	u64 pid = bpf_get_current_pid_tgid();
-	bpf_printk("ip_make_skb - %d\n", pid);
-
-	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
-	int len = PT_REGS_PARM5(ctx);
-	struct flowi4 *fl4 = (struct flowi4 *)PT_REGS_PARM2(ctx);
-
-	UdpArgs udpArgs = {};
-
-	bpf_printk("%p : %d : %p", sk, len, fl4);
-	bpf_probe_read_kernel(&udpArgs.sk, sizeof(udpArgs.sk), &sk);
-	bpf_probe_read_kernel(&udpArgs.len, sizeof(udpArgs.len), &len);
-	bpf_probe_read_kernel(&udpArgs.fl4, sizeof(udpArgs.fl4), &fl4);
-
-	bpf_map_update_elem(&makeSkb, &pid, &udpArgs, BPF_ANY);
-	return 0;
+SEC("kretprobe/udpv6_sendmsg")
+int kretprobe__udpv6_sendmsg(struct pt_regs*ctx) {
+	return udp_sendmsg_func(ctx);
 }
 
-SEC("kretprobe/ip_make_skb")
-int kretprobe__ip_make_skb(struct pt_regs *ctx) {
+
+SEC("kretprobe/udp_sendmsg")
+int kretprobe__udp_sendmsg(struct pt_regs*ctx) {
+	return udp_sendmsg_func(ctx);
+#if 0
 	u64 pid = bpf_get_current_pid_tgid();
 
-	/*
-	struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
-	int size = PT_REGS_PARM5(ctx);
-	size -= sizeof(struct udphdr);
-*/
-	UdpArgs *udpArgs;
-	udpArgs = bpf_map_lookup_elem(&makeSkb, &pid);
-	if (udpArgs == NULL) {
+
+	ProcessSessionKey *key;
+	key = bpf_map_lookup_elem(&udpSendSock, &pid);
+	if (key == NULL) {
+		bpf_printk("key null");
 		return BPF_RET_ERROR;
 	}
 
-	struct sock *sk = udpArgs->sk;
-	if (sk == NULL) {
+
+	int sendByte = PT_REGS_RC(ctx);
+	if (sendByte < 0) {
+		bpf_printk("send byte 0");
 		return BPF_RET_ERROR;
 	}
-	struct flowi4 *fl4 = udpArgs->fl4;
-	if (fl4 == NULL) {
-		return BPF_RET_ERROR;
+	int recvByte = 0;
+
+	ProcessSessionKey pKey;
+	__builtin_memset(&pKey, 0, sizeof(ProcessSessionKey));
+
+	bpf_probe_read_kernel(&pKey, sizeof(pKey), key);
+
+	int ret = setSessionInfo(&pKey.fourTuple, NOT_USE, pKey.pid);
+	if (ret != BPF_RET_OK) {
+		bpf_printk("fail set sInfo %d, \n", pKey.fourTuple.sport);
+		return ret;
 	}
-	int len = udpArgs->len;
-	len -= sizeof(struct udphdr);
-	bpf_printk("%p : %d : %p", sk, len, fl4);
-	ProcessSessionKey key;
-	int ipv;
-	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
-	if ((ipv = setProcessSessionKey(&key, sk)) == BPF_RET_ERROR) {
-		bpf_printk("SessionKey Error\n");
-		bpf_probe_read_kernel(&key.fourTuple.saddr, sizeof(key.fourTuple.saddr), &fl4->saddr);
-		bpf_probe_read_kernel(&key.fourTuple.daddr, sizeof(key.fourTuple.daddr), &fl4->daddr);
 
-		bpf_probe_read_kernel(&key.fourTuple.sport, sizeof(key.fourTuple.sport), &fl4->uli.ports.sport);
-		bpf_probe_read_kernel(&key.fourTuple.dport, sizeof(key.fourTuple.dport), &fl4->uli.ports.dport);
-		key.pid = pid;
-
-	}
-	bpf_printk("key - %d %d \n", key.fourTuple.sport, key.fourTuple.dport);
-
-	int ret;
-	if ((ret = setSessionState(&key, ipv, IPPROTO_UDP, UNKNOWN, 1, 1, 0, 0)) != BPF_RET_OK) {
-		bpf_printk("SessionState Error\n");
+	if ((ret = setSessionState(&pKey, pKey.fourTuple.ipv, IPPROTO_UDP, UNKNOWN, sendByte, 1, recvByte, 0)) != BPF_RET_OK) {
+		bpf_printk("fail set Session Sate\n");
 		return BPF_RET_ERROR;
 	}
 
-	bpf_printk("ip_make_skb(ret) - %d\n", pid);
+	bpf_printk("udp_sendmsg(ret)\n");
+	return BPF_RET_OK;
+#endif
+}
+
+SEC("kprobe/udpv6_recvmsg")
+int kprobe__udpv6_recvmsg(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+	bpf_printk("udpv6_recvmsg - %d\n", pid);
+
 	return 0;
 }
 
@@ -867,21 +1004,131 @@ SEC("kprobe/udp_recvmsg")
 int kprobe__udp_recvmsg(struct pt_regs *ctx) {
 	u64 pid = bpf_get_current_pid_tgid();
 	bpf_printk("udp_recvmsg - %d\n", pid);
+
 	return 0;
+}
+
+__attribute__((always_inline))
+static int udp_recvmsg_func(struct pt_regs *ctx) {
+	u64 pid = bpf_get_current_pid_tgid();
+
+	ProcessSessionKey *key;
+	key = bpf_map_lookup_elem(&udpRecvSock, &pid);
+	if (key == NULL) {
+		bpf_printk("key null");
+		return BPF_RET_ERROR;
+	}
+	int len = PT_REGS_PARM3(ctx);
+	int recvByte = PT_REGS_RC(ctx);
+	if (recvByte < 0) {
+		bpf_printk("recv byte 0");
+		return BPF_RET_ERROR;
+	}
+	int sendByte = 0;
+
+	bpf_printk("%d!\n", key->fourTuple.saddr);
+	bpf_printk("%d!\n", key->fourTuple.daddr);
+	bpf_printk("%d!\n", key->fourTuple.sport);
+	bpf_printk("%d!\n", key->fourTuple.dport);
+	bpf_printk("%d\n", key->pid);
+	int ret = setSessionInfo(&key->fourTuple, NOT_USE, key->pid);
+	if (ret != BPF_RET_OK) {
+		bpf_printk("fail set sInfo %d, \n", key->fourTuple.sport);
+		return ret;
+	}
+
+	if ((ret = setSessionState(key, key->fourTuple.ipv, IPPROTO_UDP, UNKNOWN, sendByte, 0, recvByte, 1)) != BPF_RET_OK) {
+		//bpf_printk("fail set Session Sate\n");
+		return BPF_RET_ERROR;
+	}
+
+	bpf_printk("udp_sendmsg(ret), len = %d, recvByte = %d\n", len, recvByte);
+	return BPF_RET_OK;
+}
+
+SEC("kretprobe/udpv6_recvmsg")
+int kretprobe_udpv6_recvmsg(struct pt_regs *ctx) {
+	bpf_printk("udpv6_recvmsg(ret)\n");
+	return udp_recvmsg_func(ctx);
+
 }
 
 SEC("kretprobe/udp_recvmsg")
 int kretprobe_udp_recvmsg(struct pt_regs *ctx) {
-	u64 pid = bpf_get_current_pid_tgid();
-	bpf_printk("udp_recvmsg(ret) - %d\n", pid);
-	return 0;
+	bpf_printk("udp_recvmsg(ret)\n");
+	return udp_recvmsg_func(ctx);
 }
 
+//TODO
+//sk_buff 관련 부분은 udp에서 4tuple 획득 말고도 여러 raw데이터 뽑는 형태로 활용 가능
+//추후 common 로직으로 분리 필요
 
 SEC("kprobe/skb_consume_udp")
 int kprobe__skb_consume_udp(struct pt_regs *ctx) {
 	u64 pid = bpf_get_current_pid_tgid();
 	bpf_printk("skb_consume_udp - %d\n", pid);
+
+	struct sock *sk;
+	sk = (struct sock*) PT_REGS_PARM1(ctx);
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM2(ctx);
+	
+
+	/*
+	struct iphdr *iph = (struct iphdr *)(skb->head+ skb->network_header);
+	u8 ipv;
+*/
+	//bpf_probe_read_kernel(&ipv, sizeof(ipv), iph);
+	//
+	unsigned char *head;
+	bpf_probe_read_kernel(&head, sizeof(head), &skb->head);
+	u16 network_header;
+	bpf_probe_read_kernel(&network_header, sizeof(network_header), &skb->network_header);
+	//struct iphdr *iph = (struct iphdr *)(head + network_header);
+	//
+	struct iphdr iph;
+
+	bpf_probe_read_kernel(&iph, sizeof(iph), (struct iphdr *)(head + network_header));
+	bpf_printk("%d\n", iph.version);
+
+	ProcessSessionKey key;
+	__builtin_memset(&key, 0, sizeof(ProcessSessionKey));
+
+	int ret = 0;
+	key.pid = pid;
+
+	if (iph.version == 4) {
+		key.fourTuple.saddr = iph.daddr;
+		key.fourTuple.daddr = iph.saddr;
+		key.fourTuple.ipv = ETH_P_IP;
+
+	} else if (iph.version == 6) {
+		struct ipv6hdr ip6h;
+		__builtin_memset(&ip6h, 0, sizeof(ip6h));
+		bpf_probe_read_kernel(&ip6h, sizeof(ip6h), (struct ipv6hdr *)(head + network_header));
+		__builtin_memcpy(&key.fourTuple.saddrv6, &ip6h.daddr, sizeof(key.fourTuple.saddrv6));
+		__builtin_memcpy(&key.fourTuple.daddrv6, &ip6h.saddr, sizeof(key.fourTuple.daddrv6));
+		key.fourTuple.ipv = ETH_P_IPV6;
+	}
+
+
+	u16 transport_header;
+	bpf_probe_read_kernel(&transport_header, sizeof(transport_header), &skb->transport_header);
+	
+	struct udphdr udph;
+	bpf_probe_read_kernel(&udph, sizeof(udph), (struct udphdr *)(head + transport_header));
+
+
+	bpf_probe_read_kernel(&key.fourTuple.sport, sizeof(key.fourTuple.sport), &udph.dest);
+	bpf_probe_read_kernel(&key.fourTuple.dport, sizeof(key.fourTuple.dport), &udph.source);
+	key.fourTuple.sport = bpf_ntohs(key.fourTuple.sport);
+	key.fourTuple.dport = bpf_ntohs(key.fourTuple.dport);
+
+#if 1
+
+	bpf_map_update_elem(&udpRecvSock, &pid, &key, BPF_ANY);
+
+
+#endif
 	return 0;
 }
 
@@ -889,7 +1136,65 @@ SEC("kretprobe/skb_consume_udp")
 int kretprobe__skb_consume_udp(struct pt_regs *ctx) {
 	u64 pid = bpf_get_current_pid_tgid();
 	bpf_printk("skb_consume_udp(ret) - %d\n", pid);
+	struct sock *sk;
+	sk = (struct sock*) PT_REGS_PARM1(ctx);
+
+	//bpf_map_update_elem(&udpRecvSock, &pid, &sk, BPF_ANY);
+
+
 	return 0;
+}
+
+//TODO fork 에 취약한 형태임
+//개선 방법 검토 필요
+//
+
+
+__attribute__((always_inline))
+static int udp_destroy_sock_func(struct pt_regs *ctx) {
+
+	u64 pid = bpf_get_current_pid_tgid();
+	ProcessSessionKey *key;
+	key = bpf_map_lookup_elem(&udpSendSock, &pid);
+	if (key == NULL) {
+		bpf_printk("key null");
+	}
+
+	ProcessSessionKey pKey;
+	__builtin_memset(&pKey, 0, sizeof(ProcessSessionKey));
+	bpf_probe_read_kernel(&pKey, sizeof(pKey), key);
+
+	bpf_map_delete_elem(&udpSendSock, &pid);
+	bpf_map_delete_elem(&bindCheckMap, &pKey.fourTuple.sport);
+	closeSessionFunc(&pKey);
+
+	key = bpf_map_lookup_elem(&udpRecvSock, &pid);
+	if (key == NULL) {
+		bpf_printk("key null");
+	}
+	__builtin_memset(&pKey, 0, sizeof(ProcessSessionKey));
+	bpf_probe_read_kernel(&pKey, sizeof(pKey), key);
+
+	bpf_map_delete_elem(&udpRecvSock, &pid);
+	bpf_map_delete_elem(&bindCheckMap, &pKey.fourTuple.sport);
+	closeSessionFunc(&pKey);
+
+
+	return BPF_RET_OK;
+
+
+}
+
+SEC("kprobe/udpv6_destroy_sock")
+int kprobe__udpv6_destroy_sock(struct pt_regs *ctx){
+	bpf_printk("udpv6_destroy_sock");
+	return udp_destroy_sock_func(ctx);
+}
+
+SEC("kprobe/udp_destroy_sock")
+int kprobe__udp_destroy_sock(struct pt_regs *ctx) {
+	bpf_printk("udp_destroy_sock");
+	return udp_destroy_sock_func(ctx);
 }
 
 

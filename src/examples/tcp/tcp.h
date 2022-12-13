@@ -22,7 +22,7 @@ typedef struct fourTupleKey {
 	u32 daddr;
 	struct in6_addr saddrv6;
 	struct in6_addr daddrv6;
-	u8 ipv;
+	int ipv;
 }FourTupleKey;
 
 #define NOCHECK_BIND 0
@@ -53,6 +53,8 @@ typedef struct processSessionKey {
 #define ETH_P_IPV6 0x86DD
 
 #define MAX_PID_LIST 5
+
+#define NOT_USE 65535 // u16 -1
 
 typedef struct sessionInfo {
 	u16 state;
@@ -92,6 +94,7 @@ typedef struct udp_args {
 	struct sock *sk;
 	int len;
 	struct flowi4 *fl4;
+	struct flowi6 *fl6;
 }UdpArgs;
 
 
@@ -110,14 +113,13 @@ struct closeStateValue *unused_close_state_value_t  __attribute__((unused));
 
 
 
-/*
+// Key : bind port, Value : Socket Type
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(FourTupleKey));
-	__uint(value_size, sizeof(BindCheckValue));
+	__uint(key_size, sizeof(u16));
+	__uint(value_size, sizeof(u16));
 	__uint(max_entries, 1024);
 } bindCheckMap SEC(".maps");
-*/
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -146,14 +148,6 @@ struct {
 	__uint(value_size, sizeof(CloseStateValue));
 	__uint(max_entries, 1024);
 } closeStateMap SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(key_size, sizeof(u16));
-	__uint(value_size, sizeof(BindCheckValue));
-	__uint(max_entries, 1024);
-} udpBindCheckMap SEC(".maps");
-
 
 // ETC //
 

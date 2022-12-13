@@ -489,4 +489,6 @@ typeof(name(0)) name(struct pt_regs *ctx)				    \
 }									    \
 static __always_inline typeof(name(0)) ____##name(struct pt_regs *ctx, ##args)
 
+#include "bpf_tracing_custom.h"
+
 #endif
