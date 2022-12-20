@@ -149,6 +149,56 @@ struct {
 	__uint(max_entries, 1024);
 } closeStateMap SEC(".maps");
 
+
+#define CONFIG_NAME_LEN 32
+#define CONFIG_VALUE_LEN 32
+
+typedef struct configValue {
+	char str [CONFIG_VALUE_LEN];
+}ConfigValue;
+
+typedef enum {
+	BPF_LOGTYPE = 1,
+	BPF_LOGLEVEL= 2
+}ConfigKey;
+
+
+struct configValue *unused_config_value_t __attribute__((unused));
+
+ConfigKey *unused_config_key_t __attribute__((unused));
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	//__uint(key_size, sizeof(ConfigName));
+	__uint(key_size, sizeof(ConfigKey));
+	__uint(value_size, sizeof(ConfigValue));
+	__uint(max_entries, 128);
+} configMap SEC(".maps");
+
+
+#define LOG_MESSAGE_LEN 128
+#define MAX_NAME_LEN 32
+#define ARGS_LEN 16
+
+typedef struct logMessage{
+	int level;
+	char func[MAX_NAME_LEN];
+	u16 line;
+	char message[LOG_MESSAGE_LEN];
+	char arg[ARGS_LEN];
+	char argLen;  // TODO N개 처리 추가
+	u64 pid;
+}LogMessage;
+
+struct logMessage *unused_log_message_t  __attribute__((unused));
+
+struct {
+	__uint(type, BPF_MAP_TYPE_QUEUE);
+	__uint(key_size, 0);
+	__uint(value_size, sizeof(LogMessage));
+	__uint(max_entries, 512);
+} logMap SEC(".maps");
+
 // ETC //
 
 

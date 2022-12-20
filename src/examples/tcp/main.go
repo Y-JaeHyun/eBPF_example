@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +17,8 @@ import (
 	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/drael/GOnetstat"
+	"github.com/whatap/golib/config/conffile"
 	"github.com/whatap/golib/io"
 	"github.com/whatap/golib/lang/pack"
 	"github.com/whatap/golib/net/oneway"
@@ -67,12 +69,20 @@ var etherMap = map[uint16]string{
 }
 
 var directionMap = map[uint8]string{
+	0: "UNKNOWN",
 	1: "IN",
 	2: "OUT",
 }
+
 var protocolMap = map[uint8]string{
 	6:  "TCP",
 	17: "UDP",
+}
+
+// ConfigKey enum과 매칭되어야함
+var configKeyMap = map[string]int32{
+	"BPF_LOGTYPE":  1,
+	"BPF_LOGLEVEL": 2,
 }
 
 var pcode int64
@@ -208,7 +218,7 @@ func getResource(ip string, port int32, resourceMap map[resourceKey]resourceInfo
 	return
 }
 
-func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[resourceKey]resourceInfo) error {
+func setPackTag(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[resourceKey]resourceInfo) error {
 	var sip string
 	var dip string
 	var port string
@@ -243,6 +253,7 @@ func setPackTagOut(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap 
 	return nil
 }
 
+/*
 // ServerType ip/port Revserse
 func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[resourceKey]resourceInfo) error {
 	if key.FourTuple.Ipv == 32768 {
@@ -277,6 +288,7 @@ func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap m
 	p.PutTag("Pid", fmt.Sprintf("%d", key.Pid))
 	return nil
 }
+*/
 
 func sendUdpSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionStateValue, onewayClient *oneway.OneWayTcpClient, resourceMap map[resourceKey]resourceInfo) error {
 	sessionPack := pack.NewTagCountPack()
@@ -284,7 +296,7 @@ func sendUdpSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionState
 	sessionPack.Time = time.Now().UnixNano() / int64(time.Millisecond)
 	sessionPack.SetPCODE(pcode)
 
-	err := setPackTagOut(sessionPack, key, resourceMap)
+	err := setPackTag(sessionPack, key, resourceMap)
 	if err != nil {
 		return err
 	}
@@ -312,7 +324,7 @@ func sendTcpSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionState
 	sessionPack.Time = time.Now().UnixNano() / int64(time.Millisecond)
 	sessionPack.SetPCODE(pcode)
 
-	err := setPackTagOut(sessionPack, key, resourceMap)
+	err := setPackTag(sessionPack, key, resourceMap)
 	if err != nil {
 		return err
 	}
@@ -437,6 +449,76 @@ func intervalProcess(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, reso
 
 }
 
+func makeString(arr []int8, size int) string {
+	b := make([]byte, size)
+
+	for i, v := range arr {
+		b[i] = byte(v)
+	}
+
+	return string(b)
+}
+
+func makeConfigIntValue(num int32) bpfConfigValue {
+	var configVal bpfConfigValue
+	str := strconv.Itoa(int(num))
+
+	strLen := len(str)
+	bufLen := len(configVal.Str)
+
+	for i := 0; i < strLen && i < bufLen; i++ {
+		configVal.Str[i] = int8(str[i])
+	}
+
+	return configVal
+}
+
+func printLog(log bpfLogMessage) string {
+
+	/*
+		b := make([]byte, len(log.Func))
+		for i, v := range logFunc {
+			b[i] = byte(v)
+		}
+	*/
+	funcName := makeString(log.Func[:], len(log.Func))
+	message := makeString(log.Message[:], len(log.Message))
+	arg := makeString(log.Arg[:], len(log.Arg))
+
+	var logMessage string
+	if log.ArgLen == 0 {
+		logMessage = fmt.Sprintf("[%s][%d][%d]%s\n", funcName, log.Line, log.Pid, message)
+	} else {
+		logMessage = fmt.Sprintf("[%s][%d][%d]%s - %s\n", funcName, log.Line, log.Pid, message, arg)
+	}
+
+	return logMessage
+}
+
+func logCheckTime(interval int, objs bpfObjects) {
+	ticker := time.NewTicker(time.Second * 1)
+	defer ticker.Stop()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("CheckTime Panic: ", r)
+		}
+	}()
+	for t := range ticker.C {
+		second := t.Second()
+		if second%interval == 2 {
+			var log bpfLogMessage
+			for {
+				if err := objs.LogMap.LookupAndDelete(nil, &log); err != nil {
+					continue
+				}
+
+				fmt.Println(printLog(log))
+			}
+		}
+	}
+
+}
+
 func checkTime(interval int, objs bpfObjects, onewayClient *oneway.OneWayTcpClient) {
 	ticker := time.NewTicker(time.Second * 1)
 	defer ticker.Stop()
@@ -451,6 +533,7 @@ func checkTime(interval int, objs bpfObjects, onewayClient *oneway.OneWayTcpClie
 			resourceMap := getKuberResourceMap()
 			intervalProcess(objs, onewayClient, resourceMap)
 		}
+
 	}
 }
 
@@ -560,17 +643,30 @@ func getKuberResourceMap() map[resourceKey]resourceInfo {
 }
 
 // $BPF_CLANG and $BPF_CFLAGS are set by the Makefile.
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags -O2 -type processSessionKey -type sessionStateValue -type tcpStateValue -type closeStateValue bpf tcp.c -- -I../headers
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags -O2 -type processSessionKey -type sessionStateValue -type tcpStateValue -type closeStateValue -type logMessage -type configValue -type ConfigKey bpf tcp.c -- -I../headers
 
 func main() {
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt, syscall.SIGTERM)
+
+	//Read Config
 	servers := make([]string, 0)
-	servers = append(servers, "15.165.146.117:6600")
-	accessKey := "x2jgg66m4jlck-z6l4o2nb3cckq0-x5jfk4ktaqmfth"
+	conf := conffile.GetConfig()
+	accessKey := conf.GetValue("accesskey")
+	serverList := conf.GetValue("whatap.server.host")
+	serverSlice := strings.Split(serverList, "/")
+	port := conf.GetInt("net_udp_port", 6600)
+
+	for _, str := range serverSlice {
+		servers = append(servers, fmt.Sprintf("%s:%d", str, port))
+	}
+
+	bpfLogType := conf.GetInt("bpf_logtype", 0)
+	bpfLogLevel := conf.GetInt("bpf_loglevel", 0)
 
 	pcode, _ = Parse(accessKey)
 
+	// TODO oneway -> secure
 	onewayClient := oneway.GetOneWayTcpClient(oneway.WithServers(servers), oneway.WithLicense(accessKey), oneway.WithUseQueue())
 	defer onewayClient.Close()
 
@@ -578,8 +674,6 @@ func main() {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		fmt.Println(err)
 	}
-
-	//	resourceMap := getKuberResourceMap()
 
 	// Load BTF
 	// TODO BTF File 배포 방법 검토 필요
@@ -616,11 +710,43 @@ func main() {
 	}
 	defer objs.Close()
 
+	// Init Map
+	// Option Set, Listen Port Set
+	// UDP 는 stateless 기반으로 소켓 정보를 통해 server bind port인지 client port인지 구분이 불가함
+	// 인지되지 않은 방향은 Unknown으로 처리
+	objs.ConfigMap.Put(configKeyMap["BPF_LOGTYPE"], makeConfigIntValue(bpfLogType))
+	var val bpfConfigValue
+	objs.ConfigMap.Lookup(configKeyMap["BPF_LOGTYPE"], &val)
+	fmt.Println(val)
+	objs.ConfigMap.Put(configKeyMap["BPF_LOGLEVEL"], makeConfigIntValue(bpfLogLevel))
+
+	tcpStats := GOnetstat.Tcp()
+	for _, tcp := range tcpStats {
+		if tcp.State == "LISTEN" {
+			typeValue := uint16(syscall.SOCK_STREAM)
+			portValue := uint16(tcp.Port)
+			fmt.Println(syscall.SOCK_STREAM)
+			err := objs.BindCheckMap.Put(&portValue, &typeValue)
+			fmt.Println(err)
+		}
+	}
+	tcp6Stats := GOnetstat.Tcp6()
+	for _, tcp := range tcp6Stats {
+		if tcp.State == "LISTEN" {
+			typeValue := uint16(syscall.SOCK_STREAM)
+			portValue := uint16(tcp.Port)
+			fmt.Println(syscall.SOCK_STREAM)
+			err := objs.BindCheckMap.Put(&portValue, &typeValue)
+			fmt.Println(err)
+		}
+	}
+
 	var kprobeMap = map[string]*ebpf.Program{
-		"tcp_connect":          objs.KprobeTcpConnect,
-		"tcp_set_state":        objs.KprobeTcpSetState,
-		"tcp_sendmsg":          objs.KprobeTcpSendmsg,
-		"tcp_cleanup_rbuf":     objs.KprobeTcpCleanupRbpf,
+		"tcp_connect":   objs.KprobeTcpConnect,
+		"tcp_set_state": objs.KprobeTcpSetState,
+		"tcp_sendmsg":   objs.KprobeTcpSendmsg,
+		"tcp_recvmsg":   objs.KprobeTcpRecvmsg,
+		//"tcp_cleanup_rbuf":     objs.KprobeTcpCleanupRbpf,
 		"tcp_close":            objs.KprobeTcpClose,
 		"inet_csk_listen_stop": objs.KprobeInetCskListenStop,
 		"tcp_finish_connect":   objs.KprobeTcpFinishConnect,
@@ -640,10 +766,11 @@ func main() {
 	}
 
 	var kretprobeMap = map[string]*ebpf.Program{
-		"tcp_connect":      objs.KretprobeTcpConnect,
-		"inet_csk_accept":  objs.KretprobeInetCskAccept,
-		"tcp_sendmsg":      objs.KretprobeTcpSendmsg,
-		"tcp_cleanup_rbuf": objs.KretprobeTcpCleanupRbpf,
+		"tcp_connect":     objs.KretprobeTcpConnect,
+		"inet_csk_accept": objs.KretprobeInetCskAccept,
+		"tcp_sendmsg":     objs.KretprobeTcpSendmsg,
+		"tcp_recvmsg":     objs.KretprobeTcpRecvmsg,
+		//"tcp_cleanup_rbuf": objs.KretprobeTcpCleanupRbpf,
 		//"inet_bind":        objs.KretprobeInetBind,
 		"ip_make_skb":     objs.KretprobeIpMakeSkb,
 		"udp_sendmsg":     objs.KretprobeUdpSendmsg,
@@ -677,7 +804,9 @@ func main() {
 		}
 	}()
 
+	// TODO 개선 필요
 	go checkTime(intervalTime, objs, onewayClient)
+	go logCheckTime(intervalTime, objs)
 
 	<-stopper
 }

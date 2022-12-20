@@ -4,8 +4,8 @@ go 1.17
 
 require (
 	github.com/cilium/ebpf v0.9.1
-	github.com/google/go-cmp v0.5.8
-	github.com/whatap/golib v0.0.8
+	github.com/drael/GOnetstat v0.0.0-20201004132414-bf4a88b0bdab
+	github.com/whatap/golib v0.0.10
 	k8s.io/apimachinery v0.25.3
 	k8s.io/client-go v0.25.3
 )
@@ -26,6 +26,7 @@ require (
 	github.com/google/uuid v1.1.2 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/magiconair/properties v1.8.6 // indirect
 	github.com/mailru/easyjson v0.7.6 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
