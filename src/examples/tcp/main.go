@@ -227,7 +227,6 @@ func setPackTag(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map
 	var pod string
 	var container string
 
-	fmt.Println(key)
 	if key.FourTuple.Ipv == 32768 {
 
 		//source info
@@ -376,9 +375,6 @@ func checkSessionEvent(key bpfProcessSessionKey, sessionState bpfSessionStateVal
 	}
 
 	protocol := getSessionState(key, sData, sessionState)
-	fmt.Println("check event")
-	fmt.Println(protocol)
-	fmt.Println(sData.SessionState)
 	if sData.SessionState.SendCount > 0 || sData.SessionState.RecvCount > 0 {
 		if protocol == 6 { // TCP
 			getTcpState(key, sData, tcpState)
@@ -418,7 +414,6 @@ func intervalProcess(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, reso
 		// Close 이후 동일 키값으로 세션 발생 케이스
 		err := objs.CloseStateMap.Lookup(key, &closeState)
 		if err != nil && (closeState.SessionState.SendCount > 0 || closeState.SessionState.RecvCount > 0) {
-			fmt.Println("Close 1")
 			checkSessionEvent(key, closeState.SessionState, closeState.TcpState, onewayClient, resourceMap)
 			delete(oldDataMap, key)
 			objs.CloseStateMap.Delete(key)
@@ -440,7 +435,6 @@ func intervalProcess(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, reso
 			break
 		}
 
-		fmt.Println("Close 2")
 		checkSessionEvent(key, closeState.SessionState, closeState.TcpState, onewayClient, resourceMap)
 
 		delete(oldDataMap, key)

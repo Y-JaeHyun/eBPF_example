@@ -156,7 +156,6 @@ static void log_printk_arg(LogMessage *log,  void *arg, int type, int logtype) {
 		__builtin_memcpy(log->arg, numArg, sizeof(log->arg));
 	} else if (type & SIGN) {
 		char numArg[ARGS_LEN] = {0, };
-		bpf_printk("sign");
 		type ^= SIGN;
 		if (type & S64) {
 			u64 value = *(s64*)arg;
@@ -1002,7 +1001,7 @@ int kretprobe__tcp_recvmsg(struct pt_regs *ctx) {
 		PROBE_ERROR;
 	}
 
-	LOG_PRINTK_ARGS("recv ", (void *)&recvByte, S32, WARN);
+	LOG_PRINTK_ARGS("recv ", (void *)&recvByte, S32, DEBUG);
 	int sendByte = 0;
 
 	ProcessSessionKey key;
