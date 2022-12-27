@@ -252,43 +252,6 @@ func setPackTag(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map
 	return nil
 }
 
-/*
-// ServerType ip/port Revserse
-func setPackTagIn(p *pack.TagCountPack, key *bpfProcessSessionKey, resourceMap map[resourceKey]resourceInfo) error {
-	if key.FourTuple.Ipv == 32768 {
-
-		var ip string
-		var port string
-		var namespace string
-		var service string
-		var pod string
-		var container string
-
-		//source info
-		ip = int2ip(key.FourTuple.Daddr).String()
-		port = fmt.Sprintf("%d", key.FourTuple.Dport)
-
-		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Dport), resourceMap)
-
-		setSourceInfo(p, ip, port, namespace, service, pod, container)
-
-		//destination info
-		ip = int2ip(key.FourTuple.Saddr).String()
-		port = fmt.Sprintf("%d", key.FourTuple.Sport)
-
-		namespace, service, pod, container = getResource(ip, int32(key.FourTuple.Sport), resourceMap)
-
-		setDestinationInfo(p, ip, port, namespace, service, pod, container)
-
-	} else {
-		// TODO
-		return errors.New("TODO")
-	}
-	p.PutTag("Pid", fmt.Sprintf("%d", key.Pid))
-	return nil
-}
-*/
-
 func sendUdpSessionPack(key *bpfProcessSessionKey, sessionState *bpfSessionStateValue, onewayClient *oneway.OneWayTcpClient, resourceMap map[resourceKey]resourceInfo) error {
 	sessionPack := pack.NewTagCountPack()
 	sessionPack.Category = "udpSessionState"
@@ -420,7 +383,6 @@ func intervalProcess(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, reso
 		}
 
 		// 현재 세션에 대한 케이스
-		fmt.Println("Now")
 		objs.TcpStateMap.Lookup(key, &tcpState)
 		checkSessionEvent(key, sessionState, tcpState, onewayClient, resourceMap)
 	}
@@ -429,7 +391,6 @@ func intervalProcess(objs bpfObjects, onewayClient *oneway.OneWayTcpClient, reso
 	// Close이후 동일 세션 미발생 케이스
 	iter = objs.CloseStateMap.Iterate()
 	for {
-
 		ret := iter.Next(&key, &closeState)
 		if !ret {
 			break
@@ -489,7 +450,7 @@ func printLog(log bpfLogMessage) string {
 	return logMessage
 }
 
-func logCheckTime(interval int, objs bpfObjects) {
+func debugLogCheckTime(interval int, objs bpfObjects) {
 	ticker := time.NewTicker(time.Second * 1)
 	defer ticker.Stop()
 	defer func() {
@@ -497,17 +458,38 @@ func logCheckTime(interval int, objs bpfObjects) {
 			log.Println("CheckTime Panic: ", r)
 		}
 	}()
+	var currentIdx uint32
+	currentIdx = 0
 	for t := range ticker.C {
 		second := t.Second()
 		if second%interval == 2 {
+			var idx uint32
+			var mapIdx uint32
 			var log bpfLogMessage
-			for {
-				if err := objs.LogMap.LookupAndDelete(nil, &log); err != nil {
-					continue
+			idx = 0
+			maxIdx := objs.LogMap.MaxEntries()
+
+			err := objs.LogMapIndex.Lookup(idx, &mapIdx)
+			if err != nil {
+				fmt.Println(err)
+				break
+			}
+
+			if currentIdx > mapIdx {
+				mapIdx += maxIdx
+			}
+			for ; currentIdx < mapIdx; currentIdx++ {
+				idx := currentIdx % maxIdx
+				if err := objs.LogMap.Lookup(idx, &log); err != nil {
+					fmt.Println(err)
+					break
 				}
 
 				fmt.Println(printLog(log))
+
 			}
+
+			currentIdx %= maxIdx
 		}
 	}
 
@@ -527,7 +509,6 @@ func checkTime(interval int, objs bpfObjects, onewayClient *oneway.OneWayTcpClie
 			resourceMap := getKuberResourceMap()
 			intervalProcess(objs, onewayClient, resourceMap)
 		}
-
 	}
 }
 
@@ -681,7 +662,7 @@ func main() {
 		}
 		fd, err = os.Open(path)
 		if err != nil {
-			fmt.Println(err)
+			fmt.Println(path, err)
 			return
 		}
 	}
@@ -711,7 +692,6 @@ func main() {
 	objs.ConfigMap.Put(configKeyMap["BPF_LOGTYPE"], makeConfigIntValue(bpfLogType))
 	var val bpfConfigValue
 	objs.ConfigMap.Lookup(configKeyMap["BPF_LOGTYPE"], &val)
-	fmt.Println(val)
 	objs.ConfigMap.Put(configKeyMap["BPF_LOGLEVEL"], makeConfigIntValue(bpfLogLevel))
 
 	tcpStats := GOnetstat.Tcp()
@@ -719,9 +699,10 @@ func main() {
 		if tcp.State == "LISTEN" {
 			typeValue := uint16(syscall.SOCK_STREAM)
 			portValue := uint16(tcp.Port)
-			fmt.Println(syscall.SOCK_STREAM)
 			err := objs.BindCheckMap.Put(&portValue, &typeValue)
-			fmt.Println(err)
+			if err != nil {
+				fmt.Println(err)
+			}
 		}
 	}
 	tcp6Stats := GOnetstat.Tcp6()
@@ -729,9 +710,10 @@ func main() {
 		if tcp.State == "LISTEN" {
 			typeValue := uint16(syscall.SOCK_STREAM)
 			portValue := uint16(tcp.Port)
-			fmt.Println(syscall.SOCK_STREAM)
 			err := objs.BindCheckMap.Put(&portValue, &typeValue)
-			fmt.Println(err)
+			if err != nil {
+				fmt.Println(err)
+			}
 		}
 	}
 
@@ -800,7 +782,7 @@ func main() {
 
 	// TODO 개선 필요
 	go checkTime(intervalTime, objs, onewayClient)
-	go logCheckTime(intervalTime, objs)
+	go debugLogCheckTime(intervalTime, objs)
 
 	<-stopper
 }

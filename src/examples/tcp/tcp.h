@@ -192,13 +192,31 @@ typedef struct logMessage{
 
 struct logMessage *unused_log_message_t  __attribute__((unused));
 
+/*
+ *kernel 5.x 이상만 사용가능, ARRAY로 대체 구현
+ *
 struct {
 	__uint(type, BPF_MAP_TYPE_QUEUE);
 	__uint(key_size, 0);
 	__uint(value_size, sizeof(LogMessage));
 	__uint(max_entries, 512);
 } logMap SEC(".maps");
+*/
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u32));
+	__uint(max_entries, 1);
+} logMapIndex SEC(".maps");
+
+#define LOG_MAX_IDX 2048
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(LogMessage));
+	__uint(max_entries, LOG_MAX_IDX);
+} logMap SEC(".maps");
 // ETC //
 
 

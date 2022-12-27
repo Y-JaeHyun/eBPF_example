@@ -96,8 +96,27 @@ __attribute__((always_inline))
 static void log_printk(LogMessage *log, int logtype) {
 	u64 pid = GET_PID;
 	log->pid = pid;
+
+
 	if (logtype == LOGMAP) {
-		bpf_map_push_elem(&logMap, log, 0);
+		u32 idx = 0;
+		u32 logMapIdx = 0;
+		u32 *pIdx  = bpf_map_lookup_elem(&logMapIndex, &idx);
+		int ret;
+
+		if (pIdx != NULL) {
+			logMapIdx = *pIdx;
+		}
+
+		//bpf_map_push_elem(&logMap, log, 0);
+		ret = bpf_map_update_elem(&logMap, &logMapIdx, log, BPF_NOEXIST);
+		bpf_printk("%d %u\n", ret, logMapIdx);
+
+		if (ret == 0) {
+			logMapIdx++;
+			logMapIdx %= LOG_MAX_IDX;
+			bpf_map_update_elem(&logMapIndex, &idx, &logMapIdx, BPF_ANY);
+		}
 	} else if (logtype == LOGPIPE) {
 		bpf_printk("[%s][%d]\n", log->func, log->line);
 		bpf_printk("\tMessage - %s\n", log->message);
@@ -108,6 +127,7 @@ static void log_printk(LogMessage *log, int logtype) {
 
 //ASCII CODE BASE
 //SIZE 16 고정, 추후 개선 필요
+#if 1
 #define ITOA16(value, result) \
 	int i = 0; \
 	for (; value && i < ARGS_LEN - 1; i++, value /= 10) {\
@@ -122,6 +142,28 @@ static void log_printk(LogMessage *log, int logtype) {
 		result[i] = result[len -i -1];\
 		result[len-i-1] = temp;\
 	}\
+
+#else
+
+__attribute__((always_inline))
+static void ITOA16(u64 value, char *str) {
+	int i = 0;
+	for (; value && i < ARGS_LEN - 1; i++, value /= 10) {
+		str[i] = (value % 10) + 48;	
+	}
+	str[i] = '\0';
+	int len = i;
+	int pivot = i / 2;
+	char temp;
+	for (i = 0; i < pivot; i++) {
+		temp = str[i];
+		str[i] = str[len - i - 1];
+		str[len-i-1] = temp;
+
+	}
+}
+
+#endif
 
 #define ATOI1(value, result) \
 	result = value[0]; \
@@ -138,19 +180,19 @@ static void log_printk_arg(LogMessage *log,  void *arg, int type, int logtype) {
 		type ^= UNSIGN;
 		if (type & U64) {
 			u64 value = *(u64*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 		else if (type & U32) {
 			u32 value = *(u32*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 		else if (type & U16) {
 			u16 value = *(u16*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 		else if (type & U8)  {
 			u8 value = *(u8*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 
 		__builtin_memcpy(log->arg, numArg, sizeof(log->arg));
@@ -159,19 +201,19 @@ static void log_printk_arg(LogMessage *log,  void *arg, int type, int logtype) {
 		type ^= SIGN;
 		if (type & S64) {
 			u64 value = *(s64*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 		else if (type & S32) {
 			u32 value = *(s32*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 		else if (type & S16) {
 			u16 value = *(s16*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 		else if (type & S8)  {
 			u8 value = *(s8*)arg;
-			ITOA16(value,  numArg)
+			ITOA16(value,  numArg);
 		}
 
 		__builtin_memcpy(log->arg, numArg, sizeof(log->arg));
@@ -183,23 +225,41 @@ static void log_printk_arg(LogMessage *log,  void *arg, int type, int logtype) {
 	log->pid = pid;
 
 	if (logtype == LOGMAP) {
-		bpf_map_push_elem(&logMap, log, 0);
+
+		u32 idx = 0; 
+		u32 logMapIdx = 0;
+		u32 *pIdx  = bpf_map_lookup_elem(&logMapIndex, &idx);
+		int ret;
+
+		if (pIdx != NULL) {
+			logMapIdx = *pIdx;
+		}
+
+		ret = bpf_map_update_elem(&logMap, &logMapIdx, log, BPF_ANY);
+
+		bpf_printk("%d, %u\n", ret, logMapIdx);
+
+		if (ret == 0) {
+			logMapIdx++;
+			logMapIdx %= LOG_MAX_IDX;
+			bpf_map_update_elem(&logMapIndex, &idx, &logMapIdx, BPF_ANY);
+		}
 	} else if (logtype == LOGPIPE) {
 		bpf_printk("[%s][%d]\n", log->func, log->line);
 		bpf_printk("\tMessage - %s\n", log->message);
 		bpf_printk("\tInfo - %s\n", log->arg);
 		bpf_printk("\tPID - %llu\n", pid);
-
-
 	}
+
+
 }
 
 
 #define SET_CONFIG_VAL \
 	int configKey = BPF_LOGTYPE;\
-	ConfigValue *pConfig = bpf_map_lookup_elem(&configMap, &configKey);\
 	int checkLogType = LOGPIPE; \
 	int checkLogLevel = WARN; \
+	ConfigValue *pConfig = bpf_map_lookup_elem(&configMap, &configKey);\
 	if (pConfig != NULL) {\
 		ATOI1(pConfig->str, checkLogType);\
 	}\
@@ -307,6 +367,7 @@ static int closeSessionFunc(ProcessSessionKey *pKey) {
 	}
 
 	int i = 0;
+	#pragma unroll
 	for (i = 0; i < MAX_PID_LIST; i++) {
 		bpf_probe_read_kernel(&pKey->pid, sizeof(u32), &sInfo->pid[i]);
 		if (pKey->pid == 0) break;
@@ -520,6 +581,7 @@ static int setSessionInfo(FourTupleKey *key, u16 state, u32 pid) {
 
 	int i = 0;
 	int check = 0;
+	#pragma unroll
 	for (; i < MAX_PID_LIST; i++) {
 		if (sInfo->pid[i] == pid) {
 			check = 1;
